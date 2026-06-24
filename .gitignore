@@ -1,0 +1,17 @@
+# Xcode
+build/
+DerivedData/
+*.xcodeproj/
+!Prismax.xcodeproj/project.xcworkspace
+*.xcworkspace
+xcuserdata/
+*.xcuserstate
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+
+# Build artifacts
+*.app
+*.dmg
