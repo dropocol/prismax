@@ -11,6 +11,10 @@ final class TerminalSession: Identifiable {
     let process: TerminalProcess
     /// Human-readable tab title (command name, or "Shell" for the default).
     var title: String
+    /// The id of the environment this shell was spawned against. When the
+    /// selected environment changes, the manager restarts the shell so the new
+    /// env's secrets are exported. nil until first spawn.
+    var environmentID: UUID?
     let createdAt: Date
 
     init(id: UUID = UUID(), process: TerminalProcess, title: String, createdAt: Date = .now) {
@@ -25,6 +29,10 @@ final class TerminalSession: Identifiable {
 /// shows the selected project's active session; switching projects switches the
 /// shown terminal. Environment variables (Keychain + .env file) for the active
 /// environment are preloaded into the shell when it starts.
+///
+/// Each session remembers the environment it was spawned with, so switching the
+/// selected environment (e.g. from "development" to "production") restarts the
+/// shell with the new secrets instead of continuing to run against the old env.
 @MainActor
 @Observable
 final class TerminalManager {
@@ -68,21 +76,32 @@ final class TerminalManager {
 
     /// Ensures the active session's process is spawned and running, returning
     /// the process and whether a fresh spawn happened.
+    ///
+    /// If the active session was spawned against a *different* environment than
+    /// `env` (the user switched envs), it's restarted so the new env's secrets
+    /// take effect — otherwise a command typed now would run against stale env
+    /// vars exported in the old shell.
     @discardableResult
     func ensureRunning(
         for project: Project,
         environment env: EnvProfile
     ) -> (process: TerminalProcess, didSpawn: Bool) {
-        let process = terminal(for: project)
-        if process.isRunning { return (process, false) }
+        let session = ensureSession(for: project)
+        // Restart the shell when the environment changed since it was spawned.
+        if session.process.isRunning, session.environmentID != env.id {
+            restartSession(session, for: project, environment: env)
+            return (session.process, true)
+        }
+        if session.process.isRunning { return (session.process, false) }
 
-        let envVars = PrismaRunnerStatic.resolveEnvironment(project: project, environment: env)
+        let envVars = EnvironmentResolver.resolve(project: project, environment: env)
+        session.environmentID = env.id
         do {
-            try process.spawn(workingDirectory: project.commandDirectory, environment: envVars)
+            try session.process.spawn(workingDirectory: project.commandDirectory, environment: envVars)
         } catch {
             print("Terminal spawn failed: \(error)")
         }
-        return (process, true)
+        return (session.process, true)
     }
 
     /// Spawns (or restarts) the active terminal for `project`.
@@ -96,13 +115,7 @@ final class TerminalManager {
             start(for: project, environment: env)
             return
         }
-        session.process.terminate()
-        let envVars = PrismaRunnerStatic.resolveEnvironment(project: project, environment: env)
-        do {
-            try session.process.spawn(workingDirectory: project.commandDirectory, environment: envVars)
-        } catch {
-            print("Terminal spawn failed: \(error)")
-        }
+        restartSession(session, for: project, environment: env)
     }
 
     /// Kills all sessions for a project (used when the project is removed).
@@ -111,6 +124,27 @@ final class TerminalManager {
             session.process.terminate()
         }
         sessionsByProject.removeValue(forKey: projectID)
+    }
+
+    /// Shared restart path used by `ensureRunning` (env switch) and `restart`.
+    private func restartSession(_ session: TerminalSession, for project: Project, environment env: EnvProfile) {
+        session.process.terminate()
+        let envVars = EnvironmentResolver.resolve(project: project, environment: env)
+        do {
+            try session.process.spawn(workingDirectory: project.commandDirectory, environment: envVars)
+            session.environmentID = env.id
+        } catch {
+            print("Terminal spawn failed: \(error)")
+        }
+    }
+
+    /// Returns the active session for `project`, creating a default "Shell"
+    /// session on first access (so the panel always has something to show).
+    private func ensureSession(for project: Project) -> TerminalSession {
+        if let session = activeSession(for: project) {
+            return session
+        }
+        return openSession(for: project, title: "Shell")
     }
 
     // MARK: Tabs
@@ -170,7 +204,7 @@ final class TerminalManager {
             // Open a new tab titled after the command (or "Shell"), then ensure
             // it's running before typing into it.
             let session = openSession(for: project, title: commandTitle ?? "Run")
-            let result = ensureRunning(process: session.process, for: project, environment: env)
+            let result = ensureRunning(process: session.process, in: session, for: project, environment: env)
             process = result.process
             didSpawn = result.didSpawn
         } else {
@@ -196,16 +230,19 @@ final class TerminalManager {
     }
 
     /// Ensures a specific process is spawned (used when opening a tab with an
-    /// already-created process).
+    /// already-created process). Tags the session with the env it was spawned
+    /// against so a later env switch can restart it.
     private func ensureRunning(
         process: TerminalProcess,
+        in session: TerminalSession,
         for project: Project,
         environment env: EnvProfile
     ) -> (process: TerminalProcess, didSpawn: Bool) {
         if process.isRunning { return (process, false) }
-        let envVars = PrismaRunnerStatic.resolveEnvironment(project: project, environment: env)
+        let envVars = EnvironmentResolver.resolve(project: project, environment: env)
         do {
             try process.spawn(workingDirectory: project.commandDirectory, environment: envVars)
+            session.environmentID = env.id
         } catch {
             print("Terminal spawn failed: \(error)")
         }

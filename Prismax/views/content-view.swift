@@ -6,18 +6,14 @@ import SwiftData
 struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(AppModel.self) private var appModel
-    @Environment(PrismaRunner.self) private var runner
 
     @Query(sort: \Project.orderIndex) private var projects: [Project]
-
-    @State private var sidebarSelection: SidebarItem?
 
     var body: some View {
         @Bindable var appModel = appModel
         NavigationSplitView {
             SidebarView(
                 projects: projects,
-                selection: $sidebarSelection,
                 onAddProject: { appModel.showingAddProject = true }
             )
             .navigationSplitViewColumnWidth(min: 220, ideal: 250, max: 320)
@@ -31,16 +27,17 @@ struct ContentView: View {
             }
         }
         .onChange(of: projects.count) {
-            guard let sel = sidebarSelection, case .project(let id) = sel else { return }
-            if !projects.contains(where: { $0.id == id }) {
-                sidebarSelection = nil
+            // Clear the selection if the selected project was deleted.
+            if case .project(let id) = appModel.sidebarSelection,
+               !projects.contains(where: { $0.id == id }) {
+                appModel.sidebarSelection = nil
             }
         }
     }
 
     @ViewBuilder
     private var contentColumn: some View {
-        switch sidebarSelection {
+        switch appModel.sidebarSelection {
         case .project(let id):
             if let project = projects.first(where: { $0.id == id }) {
                 ProjectDetailView(project: project)
@@ -101,7 +98,7 @@ struct ContentView: View {
         modelContext.insert(project)
         try? modelContext.save()
 
-        sidebarSelection = .project(project.id)
+        appModel.sidebarSelection = .project(project.id)
     }
 }
 

@@ -73,17 +73,28 @@ which the build picks up via the asset catalog.
 ```
 Prismax/
 ├── Models/         SwiftData @Model classes (Project, Environment, Command, …)
-├── Services/       PrismaRunner, KeychainService, PackageManagerDetector, …
+├── Services/       RunService, EnvironmentResolver, TerminalManager, KeychainService, …
 └── Views/          SwiftUI views (NavigationSplitView shell + tabs)
 ```
 
 ### Core mechanism
 
-`PrismaRunner.run()` builds a `Process`:
-1. Sets `currentDirectoryURL` to the project's path.
-2. Resolves the prisma executable via the detected package manager (`pnpm exec prisma`, `yarn prisma`, `bunx prisma`, `npx prisma`).
-3. Reads each environment variable from the Keychain and merges them into `Process.environment` (over the shell's existing PATH).
-4. Streams stdout + stderr line-by-line to the UI via `Pipe` + `AsyncStream`.
+Commands run inside an **integrated terminal** (a real PTY shell rendered with
+xterm.js), so they behave exactly like your own shell — interactive prompts,
+colors, and `prisma studio` all work. The run flow:
+
+1. `RunService.run()` builds the invocation via `PrismaCommandBuilder`, which
+   resolves the prisma executable from the detected package manager
+   (`pnpm exec prisma`, `yarn prisma`, `bunx prisma`, `npx prisma`) and
+   appends `--schema` (relativized to the command dir) when needed.
+2. `TerminalManager` dispatches it into the project's shell. Before the shell
+   starts, `EnvironmentResolver` overlays the selected environment's secrets —
+   read from the macOS Keychain (and an optional `.env` file) — onto the
+   process environment. `DATABASE_URL` is correct every time.
+3. Switching the active environment restarts the shell so the new env's
+   secrets take effect.
+4. Every dispatch is recorded as a `RunRecord` (History), so runs can be
+   inspected and re-dispatched later.
 
 Secrets never touch disk in plaintext.
 

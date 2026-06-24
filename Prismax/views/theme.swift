@@ -11,7 +11,6 @@ enum Theme {
     /// The single brand accent (indigo-ish). Used for primary actions, the
     /// selected tab, the active run, and emphasis.
     static let accent = Color("AppAccent", bundle: nil)
-    static let accentFallback = Color(red: 0.35, green: 0.34, blue: 0.84)
 
     // MARK: - Surfaces
 

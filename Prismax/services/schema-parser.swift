@@ -53,7 +53,6 @@ enum SchemaParser {
         for block in blocks {
             switch block.keyword {
             case "datasource":
-                if block.name == schema.datasourceProvider { /* keep first */ }
                 applyDatasource(block, to: &schema)
             case "generator":
                 schema.generators.append(parseGenerator(block))

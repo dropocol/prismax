@@ -68,7 +68,10 @@ enum BackupService {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 
         let stamp = Self.timestamp()
-        let fileURL = dir.appendingPathComponent("\(environmentName)-\(stamp)\(provider.fileExtension)")
+        // Embed the provider in the filename so backups can be labeled
+        // accurately when listed later (the extension alone is ambiguous:
+        // mysql and sqlite both use .sql).
+        let fileURL = dir.appendingPathComponent("\(environmentName)-\(provider.rawValue)-\(stamp)\(provider.fileExtension)")
 
         let command = try backupCommand(provider: provider, url: url, outputFile: fileURL)
         let output = try await run(command: command)
@@ -110,7 +113,7 @@ enum BackupService {
             .filter { $0.pathExtension == "sql" || $0.pathExtension == "dump" }
             .compactMap { url in
                 let values = try? url.resourceValues(forKeys: [.creationDateKey, .fileSizeKey])
-                let provider: Provider = url.pathExtension == "dump" ? .postgres : .sqlProviderGuess(url)
+                let provider = Provider.provider(for: url)
                 return BackupResult(
                     fileURL: url,
                     provider: provider,
@@ -153,10 +156,15 @@ enum BackupService {
             )
         case .mysql:
             guard let host = url.host, let port = url.port else { throw BackupError.missingURL }
-            return ShellCommand(
+            // Credentials are passed via MYSQL_PWD in the process environment
+            // (set in `extraEnvironment` by the caller), never on the command
+            // line — avoiding both shell injection and exposure in `ps`.
+            var cmd = ShellCommand(
                 executable: "/bin/sh",
-                arguments: ["-c", "mysqldump -h \(host) -P \(port) -u \(url.user ?? "root") \(url.lastPathComponent) > \"\(outputFile.path)\""]
+                arguments: ["-c", "mysqldump -h \(shellQuote(host)) -P \(port) -u \(shellQuote(url.user ?? "root")) \(shellQuote(url.lastPathComponent)) > \"\(outputFile.path)\""]
             )
+            if let pwd = url.password { cmd.extraEnvironment["MYSQL_PWD"] = pwd }
+            return cmd
         case .sqlite:
             // url.path is the database file path for sqlite.
             return ShellCommand(
@@ -175,10 +183,12 @@ enum BackupService {
             )
         case .mysql:
             guard let host = url.host, let port = url.port else { throw BackupError.missingURL }
-            return ShellCommand(
+            var cmd = ShellCommand(
                 executable: "/bin/sh",
-                arguments: ["-c", "mysql -h \(host) -P \(port) -u \(url.user ?? "root") \(url.lastPathComponent) < \"\(inputFile.path)\""]
+                arguments: ["-c", "mysql -h \(shellQuote(host)) -P \(port) -u \(shellQuote(url.user ?? "root")) \(shellQuote(url.lastPathComponent)) < \"\(inputFile.path)\""]
             )
+            if let pwd = url.password { cmd.extraEnvironment["MYSQL_PWD"] = pwd }
+            return cmd
         case .sqlite:
             return ShellCommand(
                 executable: "/bin/sh",
@@ -194,6 +204,12 @@ enum BackupService {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: command.executable)
         process.arguments = command.arguments
+        // Overlay any extra env (e.g. MYSQL_PWD) onto the inherited environment.
+        if !command.extraEnvironment.isEmpty {
+            var env = ProcessInfo.processInfo.environment
+            for (k, v) in command.extraEnvironment { env[k] = v }
+            process.environment = env
+        }
 
         let pipe = Pipe()
         process.standardOutput = pipe
@@ -223,6 +239,9 @@ enum BackupService {
 struct ShellCommand {
     let executable: String
     let arguments: [String]
+    /// Extra environment variables overlaid on the process's inherited env.
+    /// Used to pass `MYSQL_PWD` so credentials never appear on the command line.
+    var extraEnvironment: [String: String] = [:]
 }
 
 struct BackupResult: Identifiable {
@@ -242,7 +261,18 @@ extension BackupService.Provider {
         }
     }
 
-    static func sqlProviderGuess(_ url: URL) -> BackupService.Provider {
-        .mysql
+    /// Derives the provider from a backup filename, falling back to the
+    /// extension. New backups embed the provider in the name
+    /// (`{env}-{provider}-{stamp}`); older ones without it are inferred:
+    /// `.dump` → postgres, `.sql` → mysql (the more common of the two; sqlite
+    /// dumps are rare and we can't tell from the extension alone).
+    static func provider(for url: URL) -> BackupService.Provider {
+        let name = url.deletingPathExtension().lastPathComponent
+        for part in name.split(separator: "-") {
+            if let provider = BackupService.Provider(rawValue: String(part)) {
+                return provider
+            }
+        }
+        return url.pathExtension == "dump" ? .postgres : .mysql
     }
 }

@@ -87,7 +87,7 @@ enum PackageManager: String, Codable, CaseIterable, Identifiable {
     }
 
     /// The shell tokens that run `prisma` through this package manager.
-    /// `PrismaRunner` interprets these (executable + args).
+    /// `PrismaCommandBuilder` consumes these (executable + args).
     var prismaInvocation: (executable: String, args: [String]) {
         switch self {
         case .npm: ("npx", ["prisma"])

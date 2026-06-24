@@ -59,11 +59,17 @@ final class RunRecord {
 }
 
 enum RunStatus: String, Codable {
-    case running, success, failed, canceled
+    /// Dispatched into the integrated terminal and still running there.
+    case running
+    /// Launched but exited the foreground quickly (e.g. `studio` opens a server,
+    /// `format` writes a file) — we don't wait for an exit code.
+    case dispatched
+    case success, failed, canceled
 
     var label: String {
         switch self {
         case .running: "Running"
+        case .dispatched: "Dispatched"
         case .success: "Success"
         case .failed: "Failed"
         case .canceled: "Canceled"

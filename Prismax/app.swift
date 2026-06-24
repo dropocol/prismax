@@ -6,7 +6,7 @@ struct PrismaxApp: App {
     let modelContainer: ModelContainer
 
     @State private var appModel = AppModel()
-    @State private var runner = PrismaRunner()
+    @State private var runService = RunService()
     @State private var terminalManager = TerminalManager()
 
     init() {
@@ -25,8 +25,15 @@ struct PrismaxApp: App {
         WindowGroup {
             ContentView()
                 .environment(appModel)
-                .environment(runner)
+                .environment(runService)
                 .environment(terminalManager)
+                .onAppear {
+                    // RunService dispatches commands through the terminal
+                    // manager, so it needs a reference to it.
+                    runService.attach(terminalManager)
+                    // Restore persisted backup schedules now that SwiftData is up.
+                    BackupScheduler.shared.restoreSchedules(modelContext: modelContainer.mainContext)
+                }
                 .frame(minWidth: 960, minHeight: 640)
                 .tint(Theme.accent)
                 .onOpenURL { url in

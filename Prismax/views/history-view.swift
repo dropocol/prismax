@@ -1,11 +1,12 @@
 import SwiftUI
 import SwiftData
 
-/// Timeline of past command runs. Clicking a row opens its output in the
-/// terminal panel; the context menu offers copy / delete.
+/// Timeline of past command runs. Each row shows what ran, against which
+/// environment, and the outcome. The rerun button re-dispatches the command
+/// into the project's integrated terminal.
 struct HistoryView: View {
     @Environment(\.modelContext) private var modelContext
-    @Environment(PrismaRunner.self) private var runner
+    @Environment(RunService.self) private var runService
     @Query(sort: \RunRecord.startedAt, order: .reverse) private var records: [RunRecord]
 
     var body: some View {
@@ -20,15 +21,10 @@ struct HistoryView: View {
                 List {
                     ForEach(records) { record in
                         HStack(spacing: 8) {
+                            RunRecordRow(record: record)
+                                .frame(maxWidth: .infinity, alignment: .leading)
                             Button {
-                                runner.showRecord(record)
-                            } label: {
-                                RunRecordRow(record: record)
-                            }
-                            .buttonStyle(.plain)
-
-                            Button {
-                                try? runner.rerun(record, modelContext: modelContext)
+                                runService.rerun(record, modelContext: modelContext)
                             } label: {
                                 Image(systemName: "arrow.clockwise")
                                     .font(.system(size: 12, weight: .semibold))
@@ -40,16 +36,14 @@ struct HistoryView: View {
                             .help("Rerun")
                         }
                         .contextMenu {
-                            Button("View Output", systemImage: "eye") {
-                                runner.showRecord(record)
-                            }
                             Button("Rerun", systemImage: "arrow.clockwise") {
-                                try? runner.rerun(record, modelContext: modelContext)
+                                runService.rerun(record, modelContext: modelContext)
                             }
                             Button("Copy Output", systemImage: "doc.on.doc") {
                                 NSPasteboard.general.clearContents()
                                 NSPasteboard.general.setString(record.output, forType: .string)
                             }
+                            .disabled(record.output.isEmpty)
                             Button("Delete", systemImage: "trash", role: .destructive) {
                                 modelContext.delete(record)
                             }
@@ -89,6 +83,10 @@ private struct RunRecordRow: View {
                     Text(record.projectName).font(.system(size: 10.5))
                     Text("·").foregroundStyle(.tertiary)
                     Text(record.environmentName).font(.system(size: 10.5))
+                    Text("·").foregroundStyle(.tertiary)
+                    Text(record.status.label)
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(statusColor)
                 }
                 .foregroundStyle(.secondary)
             }
@@ -102,12 +100,23 @@ private struct RunRecordRow: View {
         switch record.status {
         case .running:
             Image(systemName: "circle.dotted").foregroundStyle(Theme.running)
+        case .dispatched:
+            Image(systemName: "arrow.up.forward.app").foregroundStyle(Theme.running)
         case .success:
             Image(systemName: "checkmark.circle.fill").foregroundStyle(Theme.success)
         case .failed:
             Image(systemName: "xmark.octagon.fill").foregroundStyle(Theme.danger)
         case .canceled:
             Image(systemName: "minus.circle.fill").foregroundStyle(Theme.warning)
+        }
+    }
+
+    private var statusColor: Color {
+        switch record.status {
+        case .running, .dispatched: Theme.running
+        case .success: Theme.success
+        case .failed: Theme.danger
+        case .canceled: Theme.warning
         }
     }
 }

@@ -4,7 +4,7 @@ import Foundation
 /// Used for short, fire-and-forget commands like `prisma migrate status`.
 enum ProcessRunner {
 
-    struct Result {
+    struct Result: Sendable {
         let exitCode: Int
         let stdout: String
         let stderr: String
@@ -36,6 +36,8 @@ enum ProcessRunner {
             return Result(exitCode: -1, stdout: "", stderr: "Launch failed: \(error.localizedDescription)")
         }
 
+        // Off-main synchronous read. Acceptable for the short migrate-status
+        // calls this serves; revisit if longer-running commands route here.
         let stdoutData = outPipe.fileHandleForReading.readDataToEndOfFile()
         let stderrData = errPipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
@@ -60,10 +62,4 @@ enum ProcessRunner {
             environment: ["HOME": ProcessInfo.processInfo.environment["HOME"] ?? NSHomeDirectory()]
         )
     }
-}
-
-/// Quotes a string for safe inclusion in a shell command. Wraps in single
-/// quotes and escapes any embedded single quotes.
-func shellQuote(_ value: String) -> String {
-    "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
 }

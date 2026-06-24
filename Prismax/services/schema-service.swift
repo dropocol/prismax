@@ -36,7 +36,9 @@ enum SchemaService {
         var databaseURLMasked: String?
     }
 
-    /// Builds a `Sendable` snapshot from the project + environment (main actor).
+    /// Builds a `Sendable` snapshot from the project + environment. Main-actor
+    /// isolated because it reads Keychain values via `EnvironmentResolver`.
+    @MainActor
     static func snapshot(project: Project, environment env: EnvProfile) -> Snapshot {
         Snapshot(
             projectID: project.id,
@@ -44,7 +46,7 @@ enum SchemaService {
             prismaDir: project.prismaDir ?? "",
             schemaPath: project.schemaPath,
             packageManager: project.packageManager,
-            envVars: PrismaRunnerStatic.resolveEnvironment(project: project, environment: env)
+            envVars: EnvironmentResolver.resolve(project: project, environment: env)
         )
     }
 
@@ -66,19 +68,14 @@ enum SchemaService {
         snapshot: Snapshot,
         schema: SchemaParser.Schema
     ) async -> MigrateStatus {
-        let (executable, args) = snapshot.packageManager.prismaInvocation
-        var tokens = [executable] + args + ["migrate", "status"]
-        // If the schema isn't at a path Prisma finds by default from the command
-        // dir, point at it explicitly (relative to the command dir).
-        if !snapshot.prismaDir.isEmpty, !snapshot.schemaPath.isEmpty {
-            let prefix = snapshot.prismaDir.hasSuffix("/") ? snapshot.prismaDir : snapshot.prismaDir + "/"
-            if snapshot.schemaPath.hasPrefix(prefix) {
-                tokens += ["--schema", String(snapshot.schemaPath.dropFirst(prefix.count))]
-            } else {
-                tokens += ["--schema", snapshot.schemaPath]
-            }
-        }
-        let commandTokens = tokens.map { shellQuote($0) }.joined(separator: " ")
+        let builder = PrismaCommandBuilder(
+            packageManager: snapshot.packageManager,
+            prismaDir: snapshot.prismaDir,
+            schemaPath: snapshot.schemaPath
+        )
+        let commandTokens = builder.commandString(for: "migrate status")
+            .split(separator: " ").map(String.init).map(shellQuote)
+            .joined(separator: " ")
 
         // Run through a login shell so the user's full PATH (Homebrew, nvm,
         // fnm, volta, etc.) is loaded; GUI apps inherit a minimal PATH.
@@ -122,35 +119,5 @@ enum SchemaService {
         var components = URLComponents(url: parsed, resolvingAgainstBaseURL: false)
         if components?.user != nil { components?.password = "••••" }
         return components?.url?.absoluteString
-    }
-}
-
-/// Static access to PrismaRunner's env-resolution helpers. This tiny shim lets
-/// SchemaService resolve env vars without holding a PrismaRunner instance.
-enum PrismaRunnerStatic {
-    /// Builds the environment dictionary for a spawned process: inherits the
-    /// base environment, overlays a referenced .env file (if any), then overlays
-    /// Keychain values (which take precedence).
-    static func resolveEnvironment(project: Project, environment env: EnvProfile) -> [String: String] {
-        var combined = ProcessInfo.processInfo.environment
-
-        // 1. Optional .env file referenced by the environment.
-        if let envFilePath = env.envFilePath, !envFilePath.isEmpty {
-            let full = (project.path as NSString).appendingPathComponent(envFilePath)
-            if let data = FileManager.default.contents(atPath: full),
-               let text = String(data: data, encoding: .utf8) {
-                for pair in EnvFileImporter.parse(text) {
-                    combined[pair.key] = pair.value
-                }
-            }
-        }
-
-        // 2. Keychain variables (take precedence over the .env file).
-        for variable in env.variables {
-            if let value = try? KeychainService.get(account: variable.keychainAccount) {
-                combined[variable.key] = value
-            }
-        }
-        return combined
     }
 }

@@ -32,6 +32,7 @@ struct BackupsTab: View {
             .padding(16)
         }
         .onAppear { refresh() }
+    .onChange(of: environment.id) { refresh() }
         .alert("Restore Backup?", isPresented: Binding(
             get: { restoreTarget != nil },
             set: { if !$0 { restoreTarget = nil } }
@@ -193,6 +194,14 @@ struct BackupsTab: View {
 
     private func refresh() {
         backups = BackupService.backups(projectID: project.id, envID: environment.id)
+        // Reflect the persisted schedule so the toggle stays accurate across
+        // app restarts and tab re-opens.
+        if let freq = BackupScheduler.shared.frequency(forEnvironment: environment.id) {
+            scheduleEnabled = true
+            scheduleFrequency = freq
+        } else {
+            scheduleEnabled = false
+        }
     }
 
     private func providerLabel(for url: String) -> String {

@@ -3,16 +3,24 @@ import SwiftData
 
 struct SidebarView: View {
     let projects: [Project]
-    @Binding var selection: SidebarItem?
     let onAddProject: () -> Void
 
+    @Environment(AppModel.self) private var appModel
     @Environment(\.modelContext) private var modelContext
+    @Environment(TerminalManager.self) private var terminalManager
     @State private var renamingProject: Project?
     @State private var renameText = ""
     @State private var deletingProject: Project?
 
+    private var selectionBinding: Binding<SidebarItem?> {
+        Binding(
+            get: { appModel.sidebarSelection },
+            set: { appModel.sidebarSelection = $0 }
+        )
+    }
+
     var body: some View {
-        List(selection: $selection) {
+        List(selection: selectionBinding) {
             Section {
                 ForEach(projects) { project in
                     NavigationLink(value: SidebarItem.project(project.id)) {
@@ -82,10 +90,15 @@ struct SidebarView: View {
             Button("Cancel", role: .cancel) { deletingProject = nil }
             Button("Remove", role: .destructive) {
                 if let project = deletingProject {
+                    // Tear down live state for this project before its models
+                    // go away, so its terminal shells and backup schedules
+                    // aren't left running orphaned.
+                    terminalManager.kill(for: project.id)
+                    BackupScheduler.shared.cancel(project: project.id)
                     modelContext.delete(project)
                     try? modelContext.save()
-                    if case .project(let id) = selection, id == project.id {
-                        selection = nil
+                    if case .project(let id) = appModel.sidebarSelection, id == project.id {
+                        appModel.sidebarSelection = nil
                     }
                 }
                 deletingProject = nil

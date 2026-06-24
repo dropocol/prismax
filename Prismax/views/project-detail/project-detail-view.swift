@@ -5,7 +5,7 @@ struct ProjectDetailView: View {
     let project: Project
 
     @Environment(\.modelContext) private var modelContext
-    @Environment(PrismaRunner.self) private var runner
+    @Environment(RunService.self) private var runService
     @Environment(TerminalManager.self) private var terminalManager
 
     @State private var selectedTab: ProjectTab = .commands
@@ -271,15 +271,12 @@ struct ProjectDetailView: View {
     }
 
     private func execute(command: Command, environment env: EnvProfile) {
-        // Route through the integrated terminal: type the command + Enter.
-        // Build the same invocation PrismaRunner uses (npx prisma / pnpm exec
-        // prisma / etc.) so the package manager is respected — the real shell
-        // resolves the executable via the user's PATH, and env vars for the
-        // active environment are already exported.
-        let (executable, baseArgs) = project.packageManager.prismaInvocation
-        let userArgs = command.prismaArgs.split(separator: " ").map(String.init).filter { !$0.isEmpty }
-        let shellCommand = ([executable] + baseArgs + userArgs).joined(separator: " ")
-        terminalManager.runCommand(shellCommand, in: project, environment: env, commandTitle: command.name)
+        // RunService dispatches the resolved invocation into the integrated
+        // terminal (npx prisma / pnpm exec prisma / etc., respecting the
+        // package manager and --schema setting) and records a RunRecord so the
+        // run shows up in History. The real shell resolves the executable via
+        // the user's PATH; env vars for the active environment are exported.
+        runService.run(command: command, environment: env, project: project, modelContext: modelContext)
     }
 
     private func guardrailLevel(command: Command, environment env: EnvProfile) -> GuardrailLevel {
