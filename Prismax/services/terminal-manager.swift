@@ -15,6 +15,11 @@ final class TerminalSession: Identifiable {
     /// selected environment changes, the manager restarts the shell so the new
     /// env's secrets are exported. nil until first spawn.
     var environmentID: UUID?
+    /// A snapshot of the resolved env vars the shell was spawned with. Compared
+    /// against a freshly resolved dict to detect edits to the *same* environment
+    /// (adding/changing/deleting a variable, editing the .env file) — which
+    /// don't change `environmentID` but must still re-export the secrets.
+    var resolvedEnvironment: [String: String]?
     let createdAt: Date
 
     init(id: UUID = UUID(), process: TerminalProcess, title: String, createdAt: Date = .now) {
@@ -77,31 +82,43 @@ final class TerminalManager {
     /// Ensures the active session's process is spawned and running, returning
     /// the process and whether a fresh spawn happened.
     ///
-    /// If the active session was spawned against a *different* environment than
-    /// `env` (the user switched envs), it's restarted so the new env's secrets
-    /// take effect — otherwise a command typed now would run against stale env
-    /// vars exported in the old shell.
+    /// Restarts the shell when the environment it should run against has changed
+    /// since it was spawned — either because the *selected* environment changed
+    /// (different id) or because the *resolved* env vars changed (a variable was
+    /// added/edited/deleted, or the referenced .env file changed). Otherwise a
+    /// command typed now would run against stale secrets exported in the old
+    /// shell.
     @discardableResult
     func ensureRunning(
         for project: Project,
         environment env: EnvProfile
     ) -> (process: TerminalProcess, didSpawn: Bool) {
         let session = ensureSession(for: project)
-        // Restart the shell when the environment changed since it was spawned.
-        if session.process.isRunning, session.environmentID != env.id {
-            restartSession(session, for: project, environment: env)
+        let resolved = EnvironmentResolver.resolve(project: project, environment: env)
+
+        // Restart the shell when the resolved env differs from what it was
+        // spawned with (covers env switches AND same-env variable edits).
+        if session.process.isRunning, isStale(session, for: env.id, resolved: resolved) {
+            restartSession(session, for: project, environment: env, resolved: resolved)
             return (session.process, true)
         }
         if session.process.isRunning { return (session.process, false) }
 
-        let envVars = EnvironmentResolver.resolve(project: project, environment: env)
         session.environmentID = env.id
+        session.resolvedEnvironment = resolved
         do {
-            try session.process.spawn(workingDirectory: project.commandDirectory, environment: envVars)
+            try session.process.spawn(workingDirectory: project.commandDirectory, environment: resolved)
         } catch {
             print("Terminal spawn failed: \(error)")
         }
         return (session.process, true)
+    }
+
+    /// True when the session's env no longer matches what `env` resolves to:
+    /// different environment id, or the same id with changed resolved vars.
+    private func isStale(_ session: TerminalSession, for envID: UUID, resolved: [String: String]) -> Bool {
+        if session.environmentID != envID { return true }
+        return session.resolvedEnvironment != resolved
     }
 
     /// Spawns (or restarts) the active terminal for `project`.
@@ -115,7 +132,8 @@ final class TerminalManager {
             start(for: project, environment: env)
             return
         }
-        restartSession(session, for: project, environment: env)
+        let resolved = EnvironmentResolver.resolve(project: project, environment: env)
+        restartSession(session, for: project, environment: env, resolved: resolved)
     }
 
     /// Kills all sessions for a project (used when the project is removed).
@@ -126,13 +144,18 @@ final class TerminalManager {
         sessionsByProject.removeValue(forKey: projectID)
     }
 
-    /// Shared restart path used by `ensureRunning` (env switch) and `restart`.
-    private func restartSession(_ session: TerminalSession, for project: Project, environment env: EnvProfile) {
+    /// Shared restart path used by `ensureRunning` (env change) and `restart`.
+    private func restartSession(
+        _ session: TerminalSession,
+        for project: Project,
+        environment env: EnvProfile,
+        resolved: [String: String]
+    ) {
         session.process.terminate()
-        let envVars = EnvironmentResolver.resolve(project: project, environment: env)
         do {
-            try session.process.spawn(workingDirectory: project.commandDirectory, environment: envVars)
+            try session.process.spawn(workingDirectory: project.commandDirectory, environment: resolved)
             session.environmentID = env.id
+            session.resolvedEnvironment = resolved
         } catch {
             print("Terminal spawn failed: \(error)")
         }
@@ -243,6 +266,7 @@ final class TerminalManager {
         do {
             try process.spawn(workingDirectory: project.commandDirectory, environment: envVars)
             session.environmentID = env.id
+            session.resolvedEnvironment = envVars
         } catch {
             print("Terminal spawn failed: \(error)")
         }
