@@ -29,6 +29,11 @@ final class TerminalProcess {
     private(set) var isRunning = false
 
     private var readTask: Task<Void, Never>?
+    /// Generation token bumped on every spawn. Read tasks capture the token at
+    /// start and bail out if it no longer matches — so the read loop from a
+    /// *previous* (now-killed) shell can't corrupt the state of a freshly
+    /// spawned one (e.g. close the new fd or mark the new shell exited).
+    private var generation: Int = 0
 
     /// In-memory scrollback of all bytes emitted by this shell, kept so a
     /// freshly (re)bound xterm.js webview can be seeded with prior output.
@@ -42,10 +47,19 @@ final class TerminalProcess {
 
     /// Spawns a login+interactive zsh in `workingDirectory`, with the given
     /// environment preloaded (Keychain vars + parsed .env file).
+    ///
+    /// Safe to call again on the same object to replace a running shell (used
+    /// by the env-change restart path). Before forking, it cancels any in-flight
+    /// read loop, closes the previous master fd, and bumps the generation token
+    /// so a lingering read from the old shell can't corrupt the new one.
     func spawn(
         workingDirectory: String,
         environment: [String: String]
     ) throws {
+        // Tear down any prior shell so its reader can't interfere with the new
+        // one (it would otherwise wake on the old fd's EOF and run handleExit,
+        // closing the new fd / marking the new shell dead).
+        teardownReader()
         // Build the full environment: inherit a sane base, then overlay caller vars.
         var env = ProcessInfo.processInfo.environment
         // Ensure HOME is set (GUI apps have it, but be safe).
@@ -145,6 +159,7 @@ final class TerminalProcess {
 
     private func startReading() {
         let fd = masterFD
+        let myGeneration = generation
         readTask = Task.detached(priority: .userInitiated) {
             var buf = [UInt8](repeating: 0, count: 8192)
             while !Task.isCancelled {
@@ -163,7 +178,7 @@ final class TerminalProcess {
                 }
             }
             await MainActor.run {
-                self.handleExit()
+                self.handleExit(generation: myGeneration)
             }
         }
     }
@@ -197,12 +212,31 @@ final class TerminalProcess {
         }
     }
 
-    private func handleExit() {
+    /// Called when a read loop ends (shell exited, or cancelled by a re-spawn).
+    /// `generation` is the generation the loop belonged to; if it doesn't match
+    /// the current one, a newer shell has since spawned and this exit belongs to
+    /// a dead old shell — leave the new shell's state untouched.
+    private func handleExit(generation: Int) {
+        guard generation == self.generation else { return }
         isRunning = false
         readContinuation?.finish()
         readContinuation = nil
         if masterFD >= 0 { close(masterFD); masterFD = -1 }
         childPID = -1
+    }
+
+    /// Cancels the current read loop and closes its fd, preparing the object
+    /// for a fresh `spawn()`. Bumps the generation so the cancelled loop's
+    /// eventual handleExit is a no-op. Idempotent.
+    private func teardownReader() {
+        generation &+= 1
+        readTask?.cancel()
+        readTask = nil
+        if masterFD >= 0 { close(masterFD); masterFD = -1 }
+        childPID = -1
+        isRunning = false
+        readContinuation?.finish()
+        readContinuation = nil
     }
 }
 
