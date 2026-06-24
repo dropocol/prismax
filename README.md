@@ -16,26 +16,57 @@ The Prisma CLI has **no `--env-file` flag** (open request since 2020). Switching
 - **History & rerun** — every run is persisted (output, exit code, duration).
 - **.env import** — paste an existing `.env` to onboard an environment in seconds.
 
-## Requirements
+## Build
+
+The easiest way is the included distribution script, which renders the icon,
+generates the Xcode project, builds a Release `.app`, and packages a `.dmg`
+into `./dist`:
+
+```bash
+./build.sh                 # → dist/Prismax.app + dist/Prismax-1.0.dmg
+./build.sh --no-dmg        # just the .app
+./build.sh --clean         # rebuild from scratch
+```
+
+This produces an **ad-hoc signed, un-notarized** build suitable for sharing
+without an Apple Developer account. Recipients will see a Gatekeeper warning on
+first launch — to open it: **right-click the app → Open → Open** (or *System
+Settings → Privacy & Security → Open Anyway*).
+
+Requirements for building:
 
 - macOS 15 (Sequoia) or later
-- Xcode 16+ (or the command-line tools) to build
-- Node.js + a package manager (npm/pnpm/yarn/bun) installed for the projects you manage
+- Xcode 16+ (or the Command-Line Tools) — provides `xcodebuild` and `swift`
+- [XcodeGen](https://github.com/yonaskolb/XcodeGen) — `brew install xcodegen`
+- Node.js + a package manager (npm/pnpm/yarn/bun) for the projects you manage
 
-## Build
+### Manual build
 
 ```bash
 # Generate the Xcode project (requires xcodegen)
 xcodegen generate
 
 # Build from the command line
-xcodebuild -project Prismax.xcodeproj -scheme Prismax -configuration Debug build
+xcodebuild -project Prismax.xcodeproj -scheme Prismax -configuration Release build
 
 # Or open in Xcode
 open Prismax.xcodeproj
 ```
 
-The built app lands in `~/Library/Developer/Xcode/DerivedData/...`. Run it from there, or copy it to `/Applications`.
+The built app lands in `~/Library/Developer/Xcode/DerivedData/...`. Run it from
+there, or copy it to `/Applications`.
+
+### App icon
+
+The icon is generated programmatically (no binary assets checked in by hand).
+To re-render all sizes from `scripts/render_app_icon.swift`:
+
+```bash
+swift scripts/render_app_icon.swift
+```
+
+This writes the PNGs into `Prismax/Resources/Assets.xcassets/AppIcon.appiconset`,
+which the build picks up via the asset catalog.
 
 ## Architecture
 
