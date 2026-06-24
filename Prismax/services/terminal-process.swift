@@ -34,6 +34,10 @@ final class TerminalProcess {
     /// *previous* (now-killed) shell can't corrupt the state of a freshly
     /// spawned one (e.g. close the new fd or mark the new shell exited).
     private var generation: Int = 0
+    /// Called on the main actor whenever a fresh shell is spawned. The terminal
+    /// view uses it to re-arm its output pump, so a re-spawned shell's output
+    /// reaches the UI without waiting for an unrelated SwiftUI re-render.
+    var onRespawn: (@MainActor () -> Void)?
 
     /// In-memory scrollback of all bytes emitted by this shell, kept so a
     /// freshly (re)bound xterm.js webview can be seeded with prior output.
@@ -116,6 +120,10 @@ final class TerminalProcess {
         history.removeAll(keepingCapacity: true)
 
         startReading()
+        // Notify the view that a fresh shell is up so it can re-arm its output
+        // pump (the previous stream finished on teardown). Without this, a
+        // re-spawned shell's output wouldn't render until an unrelated re-render.
+        onRespawn?()
     }
 
     // MARK: Read loop

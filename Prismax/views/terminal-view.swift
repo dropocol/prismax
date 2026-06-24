@@ -85,6 +85,22 @@ struct TerminalView: NSViewRepresentable {
 
         init(process: TerminalProcess) {
             self.process = process
+            super.init()
+            armRespawnCallback()
+        }
+
+        /// Wires `process.onRespawn` so that when this shell is re-spawned (e.g.
+        /// an environment-change restart) we automatically re-seed xterm.js and
+        /// start a fresh output pump — without waiting for a SwiftUI re-render.
+        func armRespawnCallback() {
+            process.onRespawn = { [weak self] in
+                guard let self, self.webViewReady else { return }
+                self.webView?.evaluateJavaScript("term.reset();", completionHandler: nil)
+                self.process.replayHistory { [weak self] base64 in
+                    self?.webView?.evaluateJavaScript("window.writeToTerminal('\(base64)');", completionHandler: nil)
+                }
+                self.startOutputPump()
+            }
         }
 
         /// Re-binds this Coordinator to a new `TerminalProcess` (project switch
@@ -95,6 +111,7 @@ struct TerminalView: NSViewRepresentable {
             outputTask?.cancel()
             pumpIsAlive = false
             process = newProcess
+            armRespawnCallback()
 
             guard webViewReady else { return }
 
