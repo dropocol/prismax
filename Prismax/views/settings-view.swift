@@ -15,11 +15,19 @@ struct SettingsView: View {
 private struct GeneralSettingsView: View {
     @AppStorage("includeSchemaArg") private var includeSchemaArg = false
     @AppStorage("terminalPlacement") private var placementRaw: String = TerminalPlacement.bottom.rawValue
+    @AppStorage("terminalMode") private var terminalModeRaw: String = TerminalMode.persistent.rawValue
 
     private var placement: Binding<TerminalPlacement> {
         Binding(
             get: { TerminalPlacement(rawValue: placementRaw) ?? .bottom },
             set: { placementRaw = $0.rawValue }
+        )
+    }
+
+    private var terminalMode: Binding<TerminalMode> {
+        Binding(
+            get: { TerminalMode(rawValue: terminalModeRaw) ?? .persistent },
+            set: { terminalModeRaw = $0.rawValue }
         )
     }
 
@@ -33,6 +41,13 @@ private struct GeneralSettingsView: View {
                 }
                 .pickerStyle(.segmented)
                 .help("Where the integrated terminal appears in the project workspace.")
+                Picker("Command runs", selection: terminalMode) {
+                    ForEach(TerminalMode.allCases) { mode in
+                        Text(mode.label).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .help("Whether each command run opens a new terminal tab or reuses the project's single terminal.")
             }
             Section("Commands") {
                 Toggle("Pass --schema to prisma commands", isOn: $includeSchemaArg)

@@ -49,29 +49,11 @@ struct ProjectDetailView: View {
     @ViewBuilder
     private var workspaceBody: some View {
         if let env = selectedEnvironment {
-            switch placement {
-            case .bottom:
-                VStack(spacing: 0) {
-                    tabContent(for: env)
-                    ResizeDivider(orientation: .horizontal,
-                                  value: $terminalHeight,
-                                  range: 120...600)
-                    TerminalPanel(project: project, environment: env)
-                        .frame(height: terminalHeight)
-                }
-            case .right:
-                HStack(spacing: 0) {
-                    tabContent(for: env)
-                        .frame(maxWidth: .infinity)
-                    ResizeDivider(orientation: .vertical,
-                                  value: $terminalWidth,
-                                  range: 280...2000)
-                    TerminalPanel(project: project, environment: env)
-                        .frame(width: terminalWidth, alignment: .leading)
-                }
-            case .hidden:
-                tabContent(for: env)
-            }
+            // The terminal lives in a single stable subtree keyed by project id
+            // so its WKWebView/Coordinator (and xterm.js scrollback) survive
+            // placement changes. We vary only how the terminal is sized/arranged
+            // — never the container type — so SwiftUI keeps the same identity.
+            terminalWorkspace(for: env)
         } else {
             ContentUnavailableView(
                 "No Environment",
@@ -79,6 +61,55 @@ struct ProjectDetailView: View {
                 description: Text("Add an environment to start running commands.")
             )
         }
+    }
+
+    /// Renders the tab content + terminal in a layout chosen by `placement`.
+    /// The terminal subtree carries `.id(project.id)` so toggling placement
+    /// reuses the same `TerminalView` instead of recreating it (which would
+    /// reset scrollback). In `.hidden`, the terminal is collapsed to zero size
+    /// rather than removed, keeping its shell + scrollback alive offscreen.
+    @ViewBuilder
+    private func terminalWorkspace(for env: EnvProfile) -> some View {
+        switch placement {
+        case .bottom:
+            VStack(spacing: 0) {
+                tabContent(for: env)
+                ResizeDivider(orientation: .horizontal,
+                              value: $terminalHeight,
+                              range: 120...600)
+                terminalPanel(for: env)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: terminalHeight)
+            }
+        case .right:
+            HStack(spacing: 0) {
+                tabContent(for: env)
+                    .frame(maxWidth: .infinity)
+                ResizeDivider(orientation: .vertical,
+                              value: $terminalWidth,
+                              range: 280...2000)
+                terminalPanel(for: env)
+                    .frame(width: terminalWidth, alignment: .leading)
+            }
+        case .hidden:
+            VStack(spacing: 0) {
+                tabContent(for: env)
+                // Keep the terminal in the tree (collapsed) so its live shell
+                // and scrollback persist while hidden.
+                terminalPanel(for: env)
+                    .frame(maxWidth: 0, maxHeight: 0)
+                    .opacity(0)
+                    .allowsHitTesting(false)
+            }
+        }
+    }
+
+    /// The terminal panel, given a stable identity per project so it survives
+    /// placement switches without being torn down.
+    @ViewBuilder
+    private func terminalPanel(for env: EnvProfile) -> some View {
+        TerminalPanel(project: project, environment: env)
+            .id(project.id)
     }
 
     // MARK: Header
@@ -248,7 +279,7 @@ struct ProjectDetailView: View {
         let (executable, baseArgs) = project.packageManager.prismaInvocation
         let userArgs = command.prismaArgs.split(separator: " ").map(String.init).filter { !$0.isEmpty }
         let shellCommand = ([executable] + baseArgs + userArgs).joined(separator: " ")
-        terminalManager.runCommand(shellCommand, in: project, environment: env)
+        terminalManager.runCommand(shellCommand, in: project, environment: env, commandTitle: command.name)
     }
 
     private func guardrailLevel(command: Command, environment env: EnvProfile) -> GuardrailLevel {

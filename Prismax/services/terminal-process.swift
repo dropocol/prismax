@@ -30,6 +30,14 @@ final class TerminalProcess {
 
     private var readTask: Task<Void, Never>?
 
+    /// In-memory scrollback of all bytes emitted by this shell, kept so a
+    /// freshly (re)bound xterm.js webview can be seeded with prior output.
+    /// Capped to bound memory; older bytes are dropped once it grows past
+    /// `historyLimit`. Raw PTY bytes (includes ANSI escapes), which is exactly
+    /// what xterm.js expects via writeToTerminal.
+    private(set) var history = Data()
+    private let historyLimit = 512 * 1024  // 512 KB
+
     // MARK: Spawn
 
     /// Spawns a login+interactive zsh in `workingDirectory`, with the given
@@ -89,6 +97,9 @@ final class TerminalProcess {
         masterFD = master
         childPID = pid
         isRunning = true
+        // A new shell means a fresh context — clear any scrollback from a prior
+        // (dead) shell on this same object.
+        history.removeAll(keepingCapacity: true)
 
         startReading()
     }
@@ -106,6 +117,32 @@ final class TerminalProcess {
 
     private var readContinuation: AsyncStream<Data>.Continuation?
 
+    /// Appends emitted bytes to the scrollback buffer, trimming the oldest data
+    /// once it exceeds the cap. A ring-buffer-by-truncation: we keep the most
+    /// recent `historyLimit` bytes, which is what you'd want to see anyway.
+    private func appendHistory(_ data: Data) {
+        history.append(data)
+        if history.count > historyLimit {
+            let overflow = history.count - historyLimit
+            history.removeFirst(overflow)
+        }
+    }
+
+    /// Replays accumulated scrollback as base64 chunks (each ≤ 8 KB), calling
+    /// `emit` for each. Used to seed a freshly bound/recreated xterm.js webview
+    /// so the user sees prior output instead of a blank terminal.
+    func replayHistory(_ emit: (String) -> Void) {
+        guard !history.isEmpty else { return }
+        let chunkSize = 8 * 1024
+        var offset = history.startIndex
+        while offset < history.endIndex {
+            let end = history.index(offset, offsetBy: chunkSize, limitedBy: history.endIndex) ?? history.endIndex
+            let chunk = history.subdata(in: offset..<end)
+            emit(chunk.base64EncodedString())
+            offset = end
+        }
+    }
+
     private func startReading() {
         let fd = masterFD
         readTask = Task.detached(priority: .userInitiated) {
@@ -115,6 +152,9 @@ final class TerminalProcess {
                 if n > 0 {
                     let data = Data(buf[0..<n])
                     await MainActor.run {
+                        // Accumulate scrollback (bounded) so a re-bound/recreated
+                        // webview can be reseeded with prior output.
+                        self.appendHistory(data)
                         self.readContinuation?.yield(data)
                     }
                 } else {

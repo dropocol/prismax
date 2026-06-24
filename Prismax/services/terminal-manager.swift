@@ -1,32 +1,73 @@
 import SwiftUI
 
-/// Owns the live terminal processes, one per project. The detail column shows
-/// the selected project's terminal; switching projects switches terminals.
-/// Environment variables (Keychain + .env file) for the active environment are
-/// preloaded into the shell when it starts.
+/// One interactive terminal session belonging to a project. In "persistent"
+/// mode there's a single session per project; in "per-command" mode each run
+/// opens a new session (a tab).
+@MainActor
+@Observable
+final class TerminalSession: Identifiable {
+    let id: UUID
+    /// The underlying PTY/shell. Observable, so views bound to it update live.
+    let process: TerminalProcess
+    /// Human-readable tab title (command name, or "Shell" for the default).
+    var title: String
+    let createdAt: Date
+
+    init(id: UUID = UUID(), process: TerminalProcess, title: String, createdAt: Date = .now) {
+        self.id = id
+        self.process = process
+        self.title = title
+        self.createdAt = createdAt
+    }
+}
+
+/// Owns the live terminal sessions, one-or-more per project. The detail column
+/// shows the selected project's active session; switching projects switches the
+/// shown terminal. Environment variables (Keychain + .env file) for the active
+/// environment are preloaded into the shell when it starts.
 @MainActor
 @Observable
 final class TerminalManager {
-    /// projectID → live terminal process
-    private(set) var processes: [UUID: TerminalProcess] = [:]
+    /// projectID → ordered sessions (newest first). The first element is the
+    /// active one shown in the terminal panel.
+    private(set) var sessionsByProject: [UUID: [TerminalSession]] = [:]
 
-    /// Returns the terminal for `project`, creating it on first access.
-    /// Note: a freshly created process is NOT spawned yet — callers must go
-    /// through `ensureRunning(...)` before reading/writing it.
-    func terminal(for project: Project) -> TerminalProcess {
-        if let existing = processes[project.id] {
-            return existing
-        }
-        let process = TerminalProcess()
-        processes[project.id] = process
-        return process
+    private static let terminalModeKey = "terminalMode"
+
+    /// Current terminal mode from user settings.
+    private var terminalMode: TerminalMode {
+        TerminalMode(rawValue: UserDefaults.standard.string(forKey: Self.terminalModeKey) ?? "")
+            ?? .persistent
     }
 
-    /// Ensures the terminal for `project` is spawned and running, returning the
-    /// process and whether a fresh spawn happened. Reuses the same object
-    /// instance (re-keyed into the dictionary on first creation) so views that
-    /// hold a reference to it stay bound to the live shell — only `restart`
-    /// ever swaps in a brand-new process.
+    // MARK: Read
+
+    /// All sessions for a project (newest first). Empty if none.
+    func sessions(for project: Project) -> [TerminalSession] {
+        sessionsByProject[project.id] ?? []
+    }
+
+    /// The session currently shown for a project (the first/newest), or nil.
+    func activeSession(for project: Project) -> TerminalSession? {
+        sessions(for: project).first
+    }
+
+    /// The active session's process — the one views should bind to. Creates a
+    /// default "Shell" session on first access (used by the persistent mode and
+    /// by the panel on appear) so the panel always has something to show.
+    func terminal(for project: Project) -> TerminalProcess {
+        if let session = activeSession(for: project) {
+            return session.process
+        }
+        // No session yet: create the default one. It isn't spawned until
+        // ensureRunning/start is called.
+        return openSession(for: project, title: "Shell").process
+    }
+
+    // MARK: Spawn / lifecycle
+
+    /// Ensures the active session's process is spawned and running, returning
+    /// the process and whether a fresh spawn happened.
     @discardableResult
     func ensureRunning(
         for project: Project,
@@ -35,13 +76,8 @@ final class TerminalManager {
         let process = terminal(for: project)
         if process.isRunning { return (process, false) }
 
-        // Same object, fresh spawn. spawn() re-points masterFD/childPID at the
-        // new PTY, and restarts the read loop. The view keeps its reference and
-        // continues to receive output via the shared TerminalProcess instance.
         let envVars = PrismaRunnerStatic.resolveEnvironment(project: project, environment: env)
         do {
-            // Spawn in the prisma command dir (e.g. a monorepo's `packages/db`)
-            // so Prisma finds schema.prisma via its default lookup.
             try process.spawn(workingDirectory: project.commandDirectory, environment: envVars)
         } catch {
             print("Terminal spawn failed: \(error)")
@@ -49,49 +85,130 @@ final class TerminalManager {
         return (process, true)
     }
 
-    /// Spawns (or restarts) the terminal for `project`, loading env vars from
-    /// the given environment (Keychain + .env file).
+    /// Spawns (or restarts) the active terminal for `project`.
     func start(for project: Project, environment env: EnvProfile) {
         _ = ensureRunning(for: project, environment: env)
     }
 
-    /// Restarts the terminal (kills the old shell, spawns a fresh one).
+    /// Restarts the active terminal (kills the old shell, spawns a fresh one).
     func restart(for project: Project, environment env: EnvProfile) {
-        processes[project.id]?.terminate()
-        processes.removeValue(forKey: project.id)
-        start(for: project, environment: env)
+        guard let session = activeSession(for: project) else {
+            start(for: project, environment: env)
+            return
+        }
+        session.process.terminate()
+        let envVars = PrismaRunnerStatic.resolveEnvironment(project: project, environment: env)
+        do {
+            try session.process.spawn(workingDirectory: project.commandDirectory, environment: envVars)
+        } catch {
+            print("Terminal spawn failed: \(error)")
+        }
     }
 
-    /// Kills the terminal for a project (used when the project is removed).
+    /// Kills all sessions for a project (used when the project is removed).
     func kill(for projectID: UUID) {
-        processes[projectID]?.terminate()
-        processes.removeValue(forKey: projectID)
+        for session in sessionsByProject[projectID] ?? [] {
+            session.process.terminate()
+        }
+        sessionsByProject.removeValue(forKey: projectID)
     }
 
-    /// Runs a command in the project's terminal by typing it + Enter. Used by
-    /// the play-button commands — they route through the real terminal so the
-    /// output, history, and interactivity all live in one place.
-    func runCommand(_ command: String, in project: Project, environment env: EnvProfile) {
-        // Ensure the shell is up. ensureRunning spawns synchronously, so by the
-        // time it returns the process is either live or spawning failed.
-        let (process, didSpawn) = ensureRunning(for: project, environment: env)
+    // MARK: Tabs
+
+    /// Opens a new session/tab for `project`, makes it active, returns it. Not
+    /// spawned — callers spawn via ensureRunning/start when needed.
+    @discardableResult
+    func openSession(for project: Project, title: String) -> TerminalSession {
+        let session = TerminalSession(process: TerminalProcess(), title: title)
+        var list = sessionsByProject[project.id] ?? []
+        list.insert(session, at: 0)
+        sessionsByProject[project.id] = list
+        return session
+    }
+
+    /// Makes the given session the active (first) one for its project.
+    func makeActive(project: Project, session sessionID: UUID) {
+        guard var list = sessionsByProject[project.id],
+              let idx = list.firstIndex(where: { $0.id == sessionID }) else { return }
+        let session = list.remove(at: idx)
+        list.insert(session, at: 0)
+        sessionsByProject[project.id] = list
+    }
+
+    /// Closes a session/tab (terminates its shell, removes it). The most recent
+    /// remaining session becomes active. Does nothing if it's the only session.
+    func closeSession(project: Project, session sessionID: UUID) {
+        guard var list = sessionsByProject[project.id], !list.isEmpty else { return }
+        guard let idx = list.firstIndex(where: { $0.id == sessionID }) else { return }
+        // Keep at least one session alive (the persistent shell).
+        if list.count == 1 {
+            // Closing the last tab: reset its shell instead of removing.
+            list[idx].process.terminate()
+            sessionsByProject[project.id] = list
+            return
+        }
+        list[idx].process.terminate()
+        list.remove(at: idx)
+        sessionsByProject[project.id] = list
+    }
+
+    // MARK: Run command
+
+    /// Runs a command in the project's terminal. Behavior depends on terminal
+    /// mode: in `.persistent` it types into the shared terminal; in `.perCommand`
+    /// it opens a fresh tab for this run and types into that.
+    func runCommand(
+        _ command: String,
+        in project: Project,
+        environment env: EnvProfile,
+        commandTitle: String? = nil
+    ) {
+        let process: TerminalProcess
+        let didSpawn: Bool
+
+        if terminalMode == .perCommand {
+            // Open a new tab titled after the command (or "Shell"), then ensure
+            // it's running before typing into it.
+            let session = openSession(for: project, title: commandTitle ?? "Run")
+            let result = ensureRunning(process: session.process, for: project, environment: env)
+            process = result.process
+            didSpawn = result.didSpawn
+        } else {
+            let result = ensureRunning(for: project, environment: env)
+            process = result.process
+            didSpawn = result.didSpawn
+        }
 
         guard process.isRunning else {
-            // Spawning failed — surface it visibly instead of swallowing it.
             print("⚠️ Prismax: terminal is not running; command not sent: \(command)")
             return
         }
 
         if didSpawn {
-            // The shell just started (login + interactive zsh sources .zprofile
-            // AND .zshrc before printing a prompt). Give it a moment to be ready
-            // to receive input, otherwise the typed command can race the startup
-            // banner and get mangled.
+            // Give a freshly-spawned login+interactive shell a moment to be
+            // ready before typing, so the command doesn't race the startup banner.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak process] in
                 process?.send(command + "\n")
             }
         } else {
             process.send(command + "\n")
         }
+    }
+
+    /// Ensures a specific process is spawned (used when opening a tab with an
+    /// already-created process).
+    private func ensureRunning(
+        process: TerminalProcess,
+        for project: Project,
+        environment env: EnvProfile
+    ) -> (process: TerminalProcess, didSpawn: Bool) {
+        if process.isRunning { return (process, false) }
+        let envVars = PrismaRunnerStatic.resolveEnvironment(project: project, environment: env)
+        do {
+            try process.spawn(workingDirectory: project.commandDirectory, environment: envVars)
+        } catch {
+            print("Terminal spawn failed: \(error)")
+        }
+        return (process, true)
     }
 }

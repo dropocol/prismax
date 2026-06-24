@@ -48,11 +48,21 @@ struct TerminalView: NSViewRepresentable {
     func updateNSView(_ nsView: WKWebView, context: Context) {
         // Ensure the WebView can accept keyboard input.
         nsView.becomeFirstResponder()
-        // If the underlying process re-spawned after dying (e.g. the user ran a
-        // command and the manager revived the shell), the previous output-pump
-        // task already exited when the old stream finished. Restart it so the
-        // fresh shell's output reaches the webview.
-        context.coordinator.restartPumpIfNeededIfRunning()
+
+        // Detect a process swap (e.g. the user switched projects, so
+        // TerminalPanel handed us a different TerminalProcess). When that
+        // happens we re-bind this Coordinator to the new process: seed the
+        // webview with the new shell's scrollback and start a fresh output
+        // pump. This keeps the WKWebView alive across project switches instead
+        // of (incorrectly) keeping it bound to the first project's shell.
+        if ObjectIdentifier(context.coordinator.process) != ObjectIdentifier(process) {
+            context.coordinator.rebind(to: process)
+        } else {
+            // Same process. If the underlying shell re-spawned after dying, the
+            // previous output-pump task already exited when the old stream
+            // finished. Restart it so the fresh shell's output reaches us.
+            context.coordinator.restartPumpIfNeededIfRunning()
+        }
     }
 
     func makeCoordinator() -> Coordinator {
@@ -63,7 +73,10 @@ struct TerminalView: NSViewRepresentable {
 
     final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
         weak var webView: WKWebView?
-        let process: TerminalProcess
+        /// Mutable so a project switch can re-bind this Coordinator to a
+        /// different TerminalProcess via `rebind(to:)` without recreating the
+        /// WKWebView (which would wipe xterm.js scrollback).
+        var process: TerminalProcess
         private var outputTask: Task<Void, Never>?
         /// True while our output pump is actively consuming the stream. It ends
         /// when the stream finishes (process exit); a re-spawn clears it.
@@ -72,6 +85,28 @@ struct TerminalView: NSViewRepresentable {
 
         init(process: TerminalProcess) {
             self.process = process
+        }
+
+        /// Re-binds this Coordinator to a new `TerminalProcess` (project switch
+        /// or tab switch). Seeds the existing webview with the new process's
+        /// accumulated scrollback and starts a fresh live output pump.
+        func rebind(to newProcess: TerminalProcess) {
+            // Stop consuming the old process's stream.
+            outputTask?.cancel()
+            pumpIsAlive = false
+            process = newProcess
+
+            guard webViewReady else { return }
+
+            // Reset xterm.js to a blank slate, then replay the new process's
+            // scrollback so the user sees its prior output, not the old
+            // project's. `\x1bc` is the RIS ("reset") escape; we follow with a
+            // fresh prompt-friendly clear by resetting the buffer in JS.
+            webView?.evaluateJavaScript("term.reset();", completionHandler: nil)
+            newProcess.replayHistory { [weak self] base64 in
+                self?.webView?.evaluateJavaScript("window.writeToTerminal('\(base64)');", completionHandler: nil)
+            }
+            startOutputPump()
         }
 
         /// Restarts the output pump when the process has been (re)spawned but
@@ -130,6 +165,12 @@ struct TerminalView: NSViewRepresentable {
             webView.evaluateJavaScript("typeof Terminal !== 'undefined' && typeof window.writeToTerminal === 'function'") { result, _ in
                 if let ok = result as? Bool, ok {
                     print("Prismax: xterm.js initialized OK")
+                    // Seed the fresh webview with this process's accumulated
+                    // scrollback before attaching the live pump, so a recreated
+                    // view shows prior output instead of going blank.
+                    self.process.replayHistory { base64 in
+                        webView.evaluateJavaScript("window.writeToTerminal('\(base64)');", completionHandler: nil)
+                    }
                     self.startOutputPump()
                     // Focus the terminal so it accepts keystrokes immediately.
                     webView.evaluateJavaScript("window.focusTerminal && window.focusTerminal();")

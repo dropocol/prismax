@@ -33,3 +33,21 @@ enum TerminalPlacement: String, Identifiable {
         }
     }
 }
+
+/// How command runs map to terminals. Persisted in
+/// @AppStorage("terminalMode").
+enum TerminalMode: String, CaseIterable, Identifiable {
+    /// One persistent terminal per project; every command types into it.
+    case persistent
+    /// Each command run opens a new terminal tab you can switch between.
+    case perCommand
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .persistent: "One persistent terminal"
+        case .perCommand: "New tab per command"
+        }
+    }
+}

@@ -1,18 +1,36 @@
 import SwiftUI
 
 /// The docked terminal panel shown at the bottom of a project workspace.
-/// Owns its toolbar (status, restart, clear) and embeds the xterm.js view.
+/// Owns its toolbar (status, restart, clear, tabs) and embeds the xterm.js view.
 struct TerminalPanel: View {
     let project: Project
     let environment: EnvProfile
     var height: CGFloat = 240
 
     @Environment(TerminalManager.self) private var terminalManager
+    @AppStorage("terminalMode") private var terminalModeRaw: String = TerminalMode.persistent.rawValue
+
+    private var terminalMode: TerminalMode {
+        TerminalMode(rawValue: terminalModeRaw) ?? .persistent
+    }
+
+    private var sessions: [TerminalSession] {
+        terminalManager.sessions(for: project)
+    }
+
+    private var activeProcess: TerminalProcess {
+        terminalManager.terminal(for: project)
+    }
 
     var body: some View {
-        let process = terminalManager.terminal(for: project)
+        let process = activeProcess
         return VStack(spacing: 0) {
             toolbar(process: process)
+            // Tab strip — only when there's more than one session.
+            if sessions.count > 1 {
+                Divider()
+                tabStrip
+            }
             Divider()
             TerminalView(process: process)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -46,6 +64,18 @@ struct TerminalPanel: View {
             .font(.system(size: 11))
             .foregroundStyle(.secondary)
             Spacer()
+            // New terminal tab (only meaningful in perCommand mode).
+            if terminalMode == .perCommand {
+                Button {
+                    terminalManager.openSession(for: project, title: "Shell")
+                } label: {
+                    Image(systemName: "plus")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.borderless)
+                .help("New terminal tab")
+            }
             Button {
                 process.send("clear\n")
             } label: {
@@ -68,6 +98,59 @@ struct TerminalPanel: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 7)
         .background(.regularMaterial)
+    }
+
+    /// Horizontal scrollable tab strip. One chip per session; click to activate,
+    /// × to close. Active tab is highlighted with the accent.
+    private var tabStrip: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 2) {
+                ForEach(sessions) { session in
+                    let isActive = sessions.first?.id == session.id
+                    tabChip(session: session, isActive: isActive)
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+        }
+        .background(Theme.consoleBar.opacity(0.5))
+    }
+
+    private func tabChip(session: TerminalSession, isActive: Bool) -> some View {
+        HStack(spacing: 5) {
+            Circle()
+                .fill(session.process.isRunning ? Theme.success : Color.secondary.opacity(0.5))
+                .frame(width: 5, height: 5)
+            Text(session.title)
+                .font(.system(size: 10.5, weight: isActive ? .semibold : .regular))
+                .lineLimit(1)
+            if sessions.count > 1 {
+                Button {
+                    terminalManager.closeSession(project: project, session: session.id)
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundStyle(.tertiary)
+                }
+                .buttonStyle(.borderless)
+                .help("Close tab")
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3)
+        .background(
+            RoundedRectangle(cornerRadius: 5)
+                .fill(isActive ? Theme.accent.opacity(0.14) : Color.clear)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 5)
+                .strokeBorder(isActive ? Theme.accent.opacity(0.3) : Color.clear, lineWidth: 0.5)
+        )
+        .foregroundStyle(isActive ? Theme.accent : .secondary)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            terminalManager.makeActive(project: project, session: session.id)
+        }
     }
 }
 
