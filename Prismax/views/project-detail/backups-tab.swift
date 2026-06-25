@@ -115,30 +115,7 @@ struct BackupsTab: View {
 
             if resolvedDatabaseURL != nil {
                 backupOptionsRow
-                // Action row: compact backup button on the left, status to its right.
-                HStack(alignment: .center, spacing: 12) {
-                    Button {
-                        performBackup()
-                    } label: {
-                        HStack(spacing: 6) {
-                            if isBackingUp {
-                                ProgressView().controlSize(.small)
-                            } else {
-                                Image(systemName: "arrow.down.circle.fill")
-                            }
-                            Text(isBackingUp ? "Backing up…" : "Back up now")
-                                .font(.rowPrimary)
-                        }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
-                    .disabled(isBackingUp)
-
-                    if let statusMessage {
-                        statusPill(message: statusMessage, error: statusError)
-                    }
-                    Spacer(minLength: 0)
-                }
+                actionRow
             } else {
                 noURLState
             }
@@ -148,31 +125,73 @@ struct BackupsTab: View {
         .cardStyle()
     }
 
+    /// Backup format and scope options, laid out as tidy labeled rows. The
+    /// format picker and schema-only toggle are Postgres-only refinements.
     private var backupOptionsRow: some View {
-        VStack(spacing: 10) {
-            HStack(spacing: 10) {
-                optionLabel("FORMAT")
-                Picker("", selection: $backupFormat) {
+        VStack(alignment: .leading, spacing: 0) {
+            // Format: label left, segmented picker right.
+            HStack(spacing: 12) {
+                Text("Format")
+                    .font(.rowPrimary)
+                    .foregroundStyle(.secondary)
+                Picker("Format", selection: $backupFormat) {
                     ForEach(BackupFormat.allCases) { f in Text(f.label).tag(f) }
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
                 .disabled(!isPostgres)
-                Spacer(minLength: 0)
             }
 
-            Divider()
+            Divider().padding(.vertical, 10)
 
+            // Scope: a single-line toggle with inline description.
             Toggle(isOn: $schemaOnly) {
-                VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 6) {
                     Text("Public schema only")
                         .font(.rowPrimary)
-                    Text("Skip `_prisma_migrations` for a portable data snapshot.")
+                    Text("·  skips `_prisma_migrations`")
                         .font(.rowSecondary)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.tertiary)
                 }
             }
             .disabled(!isPostgres)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Theme.cardFill)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(Theme.hairline, lineWidth: 0.5)
+        )
+    }
+
+    /// The primary backup button (left) with the result status to its right.
+    private var actionRow: some View {
+        HStack(alignment: .center, spacing: 12) {
+            Button {
+                performBackup()
+            } label: {
+                HStack(spacing: 6) {
+                    if isBackingUp {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Image(systemName: "arrow.down.circle.fill")
+                    }
+                    Text(isBackingUp ? "Backing up…" : "Back up now")
+                        .font(.rowPrimary)
+                }
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .disabled(isBackingUp)
+
+            if let statusMessage {
+                statusPill(message: statusMessage, error: statusError)
+            }
+            Spacer(minLength: 0)
         }
     }
 
@@ -370,13 +389,6 @@ struct BackupsTab: View {
 
     // MARK: - Helpers
 
-    private func optionLabel(_ text: String) -> some View {
-        Text(text)
-            .font(.micro)
-            .tracking(0.4)
-            .foregroundStyle(.tertiary)
-            .frame(width: 54, alignment: .leading)
-    }
 
     private func providerBadge(for url: String) -> some View {
         guard let parsed = URL(string: url), let scheme = parsed.scheme,
