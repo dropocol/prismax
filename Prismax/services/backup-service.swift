@@ -58,13 +58,44 @@ enum BackupService {
         case missingURL
         case launchFailed(String)
         case restoreFailed(String)
+        case toolMissing(provider: Provider, tool: String)
 
         var errorDescription: String? {
             switch self {
-            case .unsupportedProvider(let s): "Unsupported database provider in URL scheme: \(s)"
-            case .missingURL: "No DATABASE_URL is set for this environment."
-            case .launchFailed(let s): "Could not launch backup tool: \(s)"
-            case .restoreFailed(let s): "Restore failed: \(s)"
+            case .unsupportedProvider(let s):
+                return "Unsupported database provider in URL scheme: \(s)"
+            case .missingURL:
+                return "No DATABASE_URL is set for this environment."
+            case .launchFailed(let s):
+                return "Could not launch backup tool: \(s)"
+            case .restoreFailed(let s):
+                return "Restore failed: \(s)"
+            case .toolMissing(let provider, let tool):
+                // Actionable guidance: explain WHAT'S missing and HOW to install
+                // it for this provider, so users aren't left decoding exit 127.
+                switch provider {
+                case .postgres:
+                    return [
+                        "\"\(tool)\" was not found. Install the PostgreSQL client tools to back up / restore.",
+                        "",
+                        "• Homebrew:  brew install libpq   (or postgresql@17)",
+                        "• Postgres.app:  https://postgresapp.com",
+                        "• EnterpriseDB:  https://www.enterprisedb.com/downloads",
+                        "",
+                        "Then relaunch PrismaX.",
+                    ].joined(separator: "\n")
+                case .mysql:
+                    return [
+                        "\"\(tool)\" was not found. Install the MySQL client tools.",
+                        "",
+                        "• Homebrew:  brew install mysql-client",
+                        "• MySQL.com:  https://dev.mysql.com/downloads",
+                        "",
+                        "Then relaunch PrismaX.",
+                    ].joined(separator: "\n")
+                case .sqlite:
+                    return "\"\(tool)\" was not found. sqlite3 ships with macOS — it should be at /usr/bin/sqlite3. If missing, reinstall Command Line Tools: xcode-select --install."
+                }
             }
         }
     }
@@ -266,25 +297,37 @@ enum BackupService {
         "/Library/PostgreSQL/14/bin",
     ]
 
-    /// Executes the shell command via a **login** zsh with DB tool directories
-    /// prepended to PATH, so `pg_dump`/`psql`/`mysqldump`/`sqlite3` (installed via
-    /// Homebrew, Postgres.app, libpq, …) are found even though a GUI app inherits
-    /// only a minimal PATH. The resolved project environment is overlaid on top so
-    /// the environment's `DATABASE_URL` / `MYSQL_PWD` reach the tool.
+    /// Executes the shell command via the user's **default login shell** with DB
+    /// tool directories prepended to PATH, so `pg_dump`/`psql`/`mysqldump`/
+    /// `sqlite3` (installed via Homebrew, Postgres.app, libpq, …) are found even
+    /// though a GUI app inherits only a minimal PATH. The resolved project
+    /// environment is overlaid on top so the environment's `DATABASE_URL` /
+    /// `MYSQL_PWD` reach the tool.
     ///
-    /// Login but non-interactive (`-l -c`): loads `.zprofile` PATH contributions
-    /// without sourcing interactive `.zshrc` banners/prompts.
+    /// We use the user's configured login shell (from `getpwuid`/`$SHELL`),
+    /// not a hardcoded `/bin/zsh`, so PATH contributions from `.bash_profile`,
+    /// `.config/fish`, etc. are honored for non-zsh users. The shell runs
+    /// non-interactively (`-l -c` / `bash -lc`) so interactive banners/prompts
+    /// never leak into captured output.
+    ///
+    /// Before spawning we pre-flight the command's tool against PATH; if it's
+    /// missing we raise a clear, actionable `toolMissing` error (with install
+    /// hints) instead of a cryptic "Exit 127: command not found".
     @discardableResult
     static func run(command: ShellCommand) async throws -> String {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        process.arguments = ["-l", "-c", command.commandLine]
+        let env = Self.resolvedEnvironment(overlaying: command.extraEnvironment)
 
-        // Start from the inherited env, overlay the resolved project env, then
-        // prepend any DB tool dirs that exist so PATH finds the CLI.
-        var env = ProcessInfo.processInfo.environment
-        for (k, v) in command.extraEnvironment { env[k] = v }
-        env["PATH"] = Self.augmentedPATH(base: env["PATH"] ?? "")
+        // Pre-flight: confirm the tool resolves on PATH so we can surface a
+        // helpful error rather than "exit 127". Checked against the same PATH
+        // the command will actually use.
+        if let tool = command.tool {
+            try ensureToolAvailable(tool, in: env)
+        }
+
+        let (shell, args) = Self.loginShell(for: command.commandLine)
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: shell)
+        process.arguments = args
         process.environment = env
 
         let pipe = Pipe()
@@ -301,6 +344,81 @@ enum BackupService {
             throw BackupError.launchFailed("Exit \(process.terminationStatus): \(output)")
         }
         return output
+    }
+
+    // MARK: Shell resolution
+
+    /// The augmented environment: inherited env, overlaid with any extras
+    /// (resolved `DATABASE_URL`, `MYSQL_PWD`), with well-known DB tool
+    /// directories prepended to PATH.
+    private static func resolvedEnvironment(overlaying extras: [String: String]) -> [String: String] {
+        var env = ProcessInfo.processInfo.environment
+        for (k, v) in extras { env[k] = v }
+        env["PATH"] = augmentedPATH(base: env["PATH"] ?? "")
+        return env
+    }
+
+    /// Returns the user's default login shell and the arg vector to run
+    /// `commandLine` as a non-interactive login shell. Falls back to `/bin/sh`
+    /// if the configured shell can't be determined (always present on macOS).
+    ///
+    /// Using the user's own shell (bash/fish/zsh) means their profile's PATH
+    /// contributions (`.bash_profile`, `~/.config/fish/config.fish`, …) load,
+    /// not just zsh's `.zprofile`.
+    private static func loginShell(for commandLine: String) -> (shell: String, args: [String]) {
+        let shell = defaultShell()
+        // zsh/bash both honor `-l -c`; fish uses `-l -c`; sh/dash use `-c`.
+        switch (shell as NSString).lastPathComponent {
+        case "zsh", "bash":
+            return (shell, ["-l", "-c", commandLine])
+        case "fish":
+            return (shell, ["-l", "-c", commandLine])
+        default:
+            // /bin/sh fallback (always available): not a login shell, but PATH
+            // augmentation above already covers the common tool locations.
+            return ("/bin/sh", ["-c", commandLine])
+        }
+    }
+
+    /// The user's configured login shell, from the passwd database, falling back
+    /// to `$SHELL` and finally `/bin/sh`.
+    private static func defaultShell() -> String {
+        if let pw = getpwuid(getuid()), let s = pw.pointee.pw_shell,
+           let shell = String(cString: s, encoding: .utf8), !shell.isEmpty {
+            return shell
+        }
+        if let shell = ProcessInfo.processInfo.environment["SHELL"], !shell.isEmpty {
+            return shell
+        }
+        return "/bin/sh"
+    }
+
+    /// Raises `toolMissing` (with provider-specific install hints) if `tool`
+    /// does not resolve on PATH in `env`. The provider is inferred from the tool
+    /// name so the error message is accurate (pg_* → postgres, mysql* → mysql).
+    private static func ensureToolAvailable(_ tool: String, in env: [String: String]) throws {
+        let which = Process()
+        which.executableURL = URL(fileURLWithPath: "/usr/bin/which")
+        which.arguments = [tool]
+        which.environment = env
+        let pipe = Pipe()
+        which.standardOutput = pipe
+        which.standardError = pipe
+        do { try which.run() } catch { return } // if `which` itself fails, let the real command fail naturally
+        _ = pipe.fileHandleForReading.readDataToEndOfFile()
+        which.waitUntilExit()
+        guard which.terminationStatus == 0 else {
+            throw BackupError.toolMissing(provider: Self.provider(forTool: tool), tool: tool)
+        }
+    }
+
+    /// Infers the DB provider from a CLI tool name, for error messaging.
+    private static func provider(forTool tool: String) -> Provider {
+        let t = tool.lowercased()
+        if t.hasPrefix("pg") || t == "psql" { return .postgres }
+        if t.hasPrefix("mysql") { return .mysql }
+        if t.hasPrefix("sqlite") { return .sqlite }
+        return .postgres // best-effort default
     }
 
     /// Builds a PATH string with existing DB tool directories (those that exist
@@ -321,15 +439,35 @@ enum BackupService {
 
 // MARK: - Supporting types
 
-/// A shell command line plus optional extra environment. Executed via a login
-/// zsh so user-installed DB tools resolve on PATH.
+/// A shell command line plus optional extra environment. Executed via the
+/// user's login shell with DB tool dirs prepended to PATH.
 struct ShellCommand {
-    /// The full command string executed by `/bin/zsh -l -c`.
+    /// The full command string executed as `login-shell -l -c <commandLine>`.
     let commandLine: String
+    /// The CLI tool name (first token of `commandLine`), used for a pre-flight
+    /// availability check so missing tools surface a clear error. Derived
+    /// automatically when built via `init(commandLine:)`.
+    var tool: String?
     /// Extra environment variables overlaid on the process's inherited env.
     /// Used to pass `MYSQL_PWD` (and the resolved `DATABASE_URL`) so
     /// credentials never appear on the command line.
     var extraEnvironment: [String: String] = [:]
+
+    init(commandLine: String, extraEnvironment: [String: String] = [:]) {
+        self.commandLine = commandLine
+        self.tool = ShellCommand.firstToken(of: commandLine)
+        self.extraEnvironment = extraEnvironment
+    }
+
+    /// Extracts the first whitespace-delimited token (the tool name).
+    private static func firstToken(of line: String) -> String? {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard let end = trimmed.firstIndex(where: { $0.isWhitespace }) else {
+            return trimmed.isEmpty ? nil : trimmed
+        }
+        let tok = String(trimmed[..<end])
+        return tok.isEmpty ? nil : tok
+    }
 }
 
 struct BackupResult: Identifiable {
