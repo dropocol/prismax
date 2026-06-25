@@ -28,6 +28,10 @@ struct BackupsTab: View {
     /// cross-environment restore. Resolved alongside `resolvedDatabaseURL`.
     @State private var crossDestinations: [EnvProfile] = []
 
+    /// The on-disk directory backups for this environment are written to/read
+    /// from (after applying per-project override → global default → built-in).
+    @State private var backupDirectoryURL: URL = BackupSettings.builtInDefaultRoot
+
     private var isPostgres: Bool {
         guard let scheme = resolvedDatabaseURL.flatMap({ URL(string: $0)?.scheme }) else { return false }
         return ["postgresql", "postgres"].contains(scheme.lowercased())
@@ -37,6 +41,7 @@ struct BackupsTab: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 backupCard
+                storageCard
                 scheduleCard
                 historyCard
             }
@@ -184,6 +189,98 @@ struct BackupsTab: View {
         )
     }
 
+    // MARK: - Storage card
+
+    /// Shows where this environment's backups are stored, with the resolved path,
+    /// a "Show in Finder" action, and a per-project location override.
+    private var storageCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Image(systemName: "folder.badge.gearshape")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Text("Storage location")
+                    .font(.rowPrimary)
+                Spacer()
+            }
+
+            // The effective path for THIS environment (override > global > built-in).
+            HStack(spacing: 6) {
+                Text(backupDirectoryURL.path)
+                    .font(.system(size: 10.5, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 0)
+                Button {
+                    BackupService.revealDirectory(backupDirectoryURL)
+                } label: {
+                    Image(systemName: "arrow.right.circle")
+                        .font(.system(size: 11))
+                }
+                .buttonStyle(.borderless)
+                .help("Show this environment's backup folder in Finder")
+            }
+
+            Divider()
+
+            overrideControl
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .cardStyle()
+    }
+
+    /// Per-project override toggle/picker. When set, this project's backups go
+    /// to the chosen folder instead of the app-wide default.
+    private var overrideControl: some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Project folder")
+                    .font(.rowPrimary)
+                if let override = project.backupDirectoryOverride, !override.isEmpty {
+                    Text("Using project override")
+                        .font(.rowSecondary)
+                        .foregroundStyle(Theme.accent)
+                } else {
+                    Text("Using app default")
+                        .font(.rowSecondary)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Spacer()
+            Button("Choose…") { chooseBackupFolder() }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            if project.backupDirectoryOverride != nil {
+                Button("Reset") { clearBackupFolderOverride() }
+                    .buttonStyle(.borderless)
+                    .controlSize(.small)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func chooseBackupFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Use This Folder"
+        panel.directoryURL = URL(fileURLWithPath: project.path)
+        if panel.runModal() == .OK, let url = panel.url {
+            project.backupDirectoryOverride = url.path
+            try? modelContext.save()
+            refresh()
+        }
+    }
+
+    private func clearBackupFolderOverride() {
+        project.backupDirectoryOverride = nil
+        try? modelContext.save()
+        refresh()
+    }
+
     // MARK: - Schedule card
 
     private var scheduleCard: some View {
@@ -309,7 +406,8 @@ struct BackupsTab: View {
     // MARK: - Logic
 
     private func refresh() {
-        backups = BackupService.backups(projectID: project.id, envID: environment.id)
+        backups = BackupService.backups(project: project, environment: environment)
+        backupDirectoryURL = BackupSettings.resolvedURL(project: project, environment: environment)
         // Resolve DATABASE_URL via the full env stack (Keychain + .env file),
         // and gather other environments that can serve as cross-restore targets.
         resolvedDatabaseURL = resolvedURL(for: environment)
@@ -336,15 +434,18 @@ struct BackupsTab: View {
 
     private func performBackup() {
         guard let url = resolvedDatabaseURL else { return }
+        // Resolve the directory on the main actor (reads SwiftData models),
+        // then pass Sendable scalars into the detached Task.
+        let dir = BackupSettings.resolvedURL(project: project, environment: environment)
+        let envName = environment.name
         isBackingUp = true
         statusMessage = nil
         Task {
             do {
                 _ = try await BackupService.backup(
                     databaseURL: url,
-                    project: project.id,
-                    environment: environment.id,
-                    environmentName: environment.name,
+                    environmentName: envName,
+                    directory: dir,
                     format: backupFormat,
                     schemaOnly: schemaOnly
                 )

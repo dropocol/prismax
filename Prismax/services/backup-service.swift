@@ -102,7 +102,13 @@ enum BackupService {
 
     // MARK: Backup
 
-    /// Creates a timestamped backup file under the app's Application Support dir.
+    /// Creates a timestamped backup file in `directory`, named with
+    /// `environmentName` and the detected provider.
+    ///
+    /// Callers resolve `directory` via `BackupSettings.resolvedURL(...)` on the
+    /// main actor (it reads SwiftData models) and pass the resulting Sendable
+    /// URL here — keeping this method decoupled from SwiftData and safe to call
+    /// from a detached Task.
     ///
     /// - Parameters:
     ///   - format: On-disk format (compressed `.dump` vs plain `.sql`).
@@ -113,9 +119,8 @@ enum BackupService {
     ///     restore across environments without clobbering migration state.
     static func backup(
         databaseURL: String,
-        project projectID: UUID,
-        environment envID: UUID,
         environmentName: String,
+        directory: URL,
         format: BackupFormat = .compressed,
         schemaOnly: Bool = false
     ) async throws -> BackupResult {
@@ -124,14 +129,13 @@ enum BackupService {
             throw BackupError.unsupportedProvider(URL(string: databaseURL)?.scheme ?? "(none)")
         }
 
-        let dir = backupDirectory(projectID: projectID, envID: envID)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 
         let stamp = Self.timestamp()
         // Embed the provider + format in the filename so backups can be labeled
         // accurately when listed later (the extension alone is ambiguous:
         // mysql and sqlite both use .sql).
-        let fileURL = dir.appendingPathComponent("\(environmentName)-\(provider.rawValue)-\(stamp)\(BackupService.Provider.fileExtension(for: provider, format: format))")
+        let fileURL = directory.appendingPathComponent("\(environmentName)-\(provider.rawValue)-\(stamp)\(BackupService.Provider.fileExtension(for: provider, format: format))")
 
         let command = try backupCommand(provider: provider, url: url, outputFile: fileURL, format: format, schemaOnly: schemaOnly)
         let output = try await run(command: command)
@@ -186,8 +190,10 @@ enum BackupService {
 
     // MARK: Listing
 
-    static func backups(projectID: UUID, envID: UUID) -> [BackupResult] {
-        let dir = backupDirectory(projectID: projectID, envID: envID)
+    /// Lists existing backups for a (project, environment), read from that
+    /// environment's resolved backup directory.
+    static func backups(project: Project, environment: EnvProfile) -> [BackupResult] {
+        let dir = BackupSettings.resolvedURL(project: project, environment: environment)
         guard let entries = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.creationDateKey, .fileSizeKey]) else {
             return []
         }
@@ -215,15 +221,25 @@ enum BackupService {
         NSWorkspace.shared.activateFileViewerSelecting([fileURL])
     }
 
+    /// Reveals a backup directory in Finder. If the directory doesn't exist yet
+    /// (no backups taken), reveals its parent so the user still lands somewhere
+    /// useful; creates the directory first so Finder shows the intended folder.
+    static func revealDirectory(_ url: URL) {
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: url.path) {
+            // Best effort — don't fail the reveal if creation is blocked.
+            try? fm.createDirectory(at: url, withIntermediateDirectories: true)
+        }
+        let target = fm.fileExists(atPath: url.path) ? url : url.deletingLastPathComponent()
+        NSWorkspace.shared.open(target)
+    }
+
     // MARK: Paths
 
-    static func backupDirectory(projectID: UUID, envID: UUID) -> URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("PrismaX", isDirectory: true)
-            .appendingPathComponent("backups", isDirectory: true)
-            .appendingPathComponent(projectID.uuidString, isDirectory: true)
-            .appendingPathComponent(envID.uuidString, isDirectory: true)
-        return base
+    /// The resolved backup directory for a (project, environment). Delegates to
+    /// `BackupSettings` for the global-default / per-project-override precedence.
+    static func backupDirectory(project: Project, environment: EnvProfile) -> URL {
+        BackupSettings.resolvedURL(project: project, environment: environment)
     }
 
     // MARK: Command building

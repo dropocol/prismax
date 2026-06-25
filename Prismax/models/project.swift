@@ -18,6 +18,11 @@ final class Project {
     var prismaDir: String?
     /// Path to schema.prisma relative to `path` (e.g. "prisma/schema.prisma"). May be empty until detected.
     var schemaPath: String
+    /// Optional absolute path to a folder for this project's backups. When nil,
+    /// the app-wide default backup location (Settings → Backups) is used; if that
+    /// is also unset, the built-in default (Application Support) is used. Mirrors
+    /// `prismaDir`'s nil-means-default convention.
+    var backupDirectoryOverride: String?
     var createdAt: Date
     var orderIndex: Int
 
@@ -34,6 +39,7 @@ final class Project {
         packageManager: PackageManager = .npm,
         prismaDir: String? = nil,
         schemaPath: String = "prisma/schema.prisma",
+        backupDirectoryOverride: String? = nil,
         createdAt: Date = .now,
         orderIndex: Int = 0
     ) {
@@ -43,6 +49,7 @@ final class Project {
         self.packageManagerRaw = packageManager.rawValue
         self.prismaDir = prismaDir
         self.schemaPath = schemaPath
+        self.backupDirectoryOverride = backupDirectoryOverride
         self.createdAt = createdAt
         self.orderIndex = orderIndex
     }

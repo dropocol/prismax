@@ -159,12 +159,15 @@ final class BackupScheduler {
               !url.isEmpty else {
             return
         }
+        // Resolve the directory here (main actor; reads SwiftData models) and
+        // pass Sendable scalars into the detached Task.
+        let dir = BackupSettings.resolvedURL(project: project, environment: environment)
+        let envName = environment.name
         Task {
             _ = try? await BackupService.backup(
                 databaseURL: url,
-                project: project.id,
-                environment: environment.id,
-                environmentName: environment.name
+                environmentName: envName,
+                directory: dir
             )
         }
     }

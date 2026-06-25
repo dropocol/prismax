@@ -18,6 +18,11 @@ private struct GeneralSettingsView: View {
     @AppStorage("terminalPlacement") private var placementRaw: String = TerminalPlacement.bottom.rawValue
     @AppStorage("terminalMode") private var terminalModeRaw: String = TerminalMode.persistent.rawValue
 
+    /// App-wide default backup folder (mirrors `BackupSettings.globalLocationKey`).
+    /// Held as State and refreshed on appear/change since the path is set via
+    /// `BackupSettings.setGlobalDefault`, not directly through this @AppStorage.
+    @State private var backupLocationURL: URL?
+
     private var placement: Binding<TerminalPlacement> {
         Binding(
             get: { TerminalPlacement(rawValue: placementRaw) ?? .bottom },
@@ -54,8 +59,54 @@ private struct GeneralSettingsView: View {
                 Toggle("Pass --schema to prisma commands", isOn: $includeSchemaArg)
                     .help("Include the detected schema path on every command run.")
             }
+            Section("Backups") {
+                backupsSection
+            }
         }
         .formStyle(.grouped)
+        .onAppear { backupLocationURL = BackupSettings.globalDefaultURL() }
+    }
+
+    /// Global default backup location for all projects (overridable per-project).
+    @ViewBuilder
+    private var backupsSection: some View {
+        if let url = backupLocationURL {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(url.path)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text("Used by projects without their own override.")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
+            Button("Change…") { chooseBackupFolder() }
+            Button("Reset to default") {
+                BackupSettings.setGlobalDefault(nil)
+                backupLocationURL = nil
+            }
+        } else {
+            Text("Default: \(BackupSettings.builtInDefaultRoot.path)")
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Button("Choose Folder…") { chooseBackupFolder() }
+                .help("Store all backups in a custom folder (e.g. your repo or an external drive).")
+        }
+    }
+
+    private func chooseBackupFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Use This Folder"
+        if panel.runModal() == .OK, let url = panel.url {
+            BackupSettings.setGlobalDefault(url)
+            backupLocationURL = url
+        }
     }
 }
 
