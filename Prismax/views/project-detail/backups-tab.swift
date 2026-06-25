@@ -90,6 +90,7 @@ struct BackupsTab: View {
     /// add one (variable OR connected .env file).
     private var backupCard: some View {
         VStack(alignment: .leading, spacing: 14) {
+            // Header: icon + title on the left, provider badge on the right.
             HStack(spacing: 8) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 7, style: .continuous)
@@ -114,29 +115,32 @@ struct BackupsTab: View {
 
             if resolvedDatabaseURL != nil {
                 backupOptionsRow
-                Button {
-                    performBackup()
-                } label: {
-                    HStack(spacing: 6) {
-                        if isBackingUp {
-                            ProgressView().controlSize(.small)
-                        } else {
-                            Image(systemName: "arrow.down.circle.fill")
+                // Action row: compact backup button on the left, status to its right.
+                HStack(alignment: .center, spacing: 12) {
+                    Button {
+                        performBackup()
+                    } label: {
+                        HStack(spacing: 6) {
+                            if isBackingUp {
+                                ProgressView().controlSize(.small)
+                            } else {
+                                Image(systemName: "arrow.down.circle.fill")
+                            }
+                            Text(isBackingUp ? "Backing up…" : "Back up now")
+                                .font(.rowPrimary)
                         }
-                        Text(isBackingUp ? "Backing up…" : "Back up now")
-                            .font(.rowPrimary)
                     }
-                    .frame(maxWidth: .infinity)
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .disabled(isBackingUp)
+
+                    if let statusMessage {
+                        statusPill(message: statusMessage, error: statusError)
+                    }
+                    Spacer(minLength: 0)
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .disabled(isBackingUp)
             } else {
                 noURLState
-            }
-
-            if let statusMessage {
-                statusPill(message: statusMessage, error: statusError)
             }
         }
         .padding(14)
