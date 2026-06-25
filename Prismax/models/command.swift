@@ -40,26 +40,40 @@ final class Command {
     }
 }
 
+/// Command categories mirroring the Prisma CLI's top-level command groups,
+/// so the Commands tab groups commands the same way the CLI exposes them.
 enum CommandCategory: String, Codable, CaseIterable, Identifiable {
-    case migrate, database, generate, studio, custom
+    case setup, migrate, database, generate, schema, studio, postgres, platform, mcp, diagnostics, custom
     var id: String { rawValue }
 
     var label: String {
         switch self {
+        case .setup: "Setup"
         case .migrate: "Migrations"
         case .database: "Database"
         case .generate: "Generate"
+        case .schema: "Schema"
         case .studio: "Studio"
+        case .postgres: "Postgres"
+        case .platform: "Platform"
+        case .mcp: "MCP"
+        case .diagnostics: "Diagnostics"
         case .custom: "Custom"
         }
     }
 
     var symbol: String {
         switch self {
+        case .setup: "plus.app"
         case .migrate: "arrow.triangle.swap"
         case .database: "cylinder"
         case .generate: "wand.and.stars"
+        case .schema: "doc.text"
         case .studio: "macwindow"
+        case .postgres: "link"
+        case .platform: "serverlever"
+        case .mcp: "network"
+        case .diagnostics: "stethoscope"
         case .custom: "terminal"
         }
     }

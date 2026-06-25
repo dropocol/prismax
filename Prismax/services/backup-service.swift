@@ -1,6 +1,25 @@
 import Foundation
 import AppKit
 
+/// On-disk format for a backup file.
+///
+/// - `compressed`: Postgres custom format (`pg_dump -F c`, `.dump`) — compact,
+///   supports selective/parallel restore via `pg_restore`. Default.
+/// - `plainSQL`: Portable, human/diff-readable SQL text (`pg_dump` with no
+///   `-F`, `.sql`) restored via `psql -f`. Useful when you want to inspect or
+///   edit the dump before restoring.
+enum BackupFormat: String, Codable, CaseIterable, Identifiable {
+    case compressed, plainSQL
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .compressed: "Compressed (.dump)"
+        case .plainSQL: "Plain SQL (.sql)"
+        }
+    }
+}
+
 /// Runs database backups and restores. Detects the DB provider from the
 /// `DATABASE_URL` scheme and shells out to `pg_dump` / `mysqldump` / `sqlite3`.
 enum BackupService {
@@ -53,11 +72,21 @@ enum BackupService {
     // MARK: Backup
 
     /// Creates a timestamped backup file under the app's Application Support dir.
+    ///
+    /// - Parameters:
+    ///   - format: On-disk format (compressed `.dump` vs plain `.sql`).
+    ///     Only Postgres distinguishes the two; MySQL/SQLite always emit SQL.
+    ///   - schemaOnly: When true (Postgres only), restricts the dump to the
+    ///     `public` schema and omits Prisma's migration-history table
+    ///     (`_prisma_migrations`), yielding a data-only snapshot that's safe to
+    ///     restore across environments without clobbering migration state.
     static func backup(
         databaseURL: String,
         project projectID: UUID,
         environment envID: UUID,
-        environmentName: String
+        environmentName: String,
+        format: BackupFormat = .compressed,
+        schemaOnly: Bool = false
     ) async throws -> BackupResult {
         guard let url = URL(string: databaseURL), let scheme = url.scheme,
               let provider = Provider(urlScheme: scheme) else {
@@ -68,12 +97,12 @@ enum BackupService {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 
         let stamp = Self.timestamp()
-        // Embed the provider in the filename so backups can be labeled
+        // Embed the provider + format in the filename so backups can be labeled
         // accurately when listed later (the extension alone is ambiguous:
         // mysql and sqlite both use .sql).
-        let fileURL = dir.appendingPathComponent("\(environmentName)-\(provider.rawValue)-\(stamp)\(provider.fileExtension)")
+        let fileURL = dir.appendingPathComponent("\(environmentName)-\(provider.rawValue)-\(stamp)\(BackupService.Provider.fileExtension(for: provider, format: format))")
 
-        let command = try backupCommand(provider: provider, url: url, outputFile: fileURL)
+        let command = try backupCommand(provider: provider, url: url, outputFile: fileURL, format: format, schemaOnly: schemaOnly)
         let output = try await run(command: command)
 
         let attrs = try? FileManager.default.attributesOfItem(atPath: fileURL.path)
@@ -90,6 +119,10 @@ enum BackupService {
 
     // MARK: Restore
 
+    /// Restores a backup into the database at `databaseURL`. The restore method
+    /// is chosen from the backup's on-disk format: compressed `.dump` uses
+    /// `pg_restore`, plain `.sql` uses `psql -f` (and likewise `mysql`/`sqlite3`
+    /// for those providers).
     static func restore(databaseURL: String, from fileURL: URL) async throws -> String {
         guard let url = URL(string: databaseURL), let scheme = url.scheme,
               let provider = Provider(urlScheme: scheme) else {
@@ -98,7 +131,25 @@ enum BackupService {
         guard FileManager.default.fileExists(atPath: fileURL.path) else {
             throw BackupError.restoreFailed("Backup file not found.")
         }
-        let command = try restoreCommand(provider: provider, url: url, inputFile: fileURL)
+        let format = BackupFormat.format(for: fileURL, provider: provider)
+        let command = try restoreCommand(provider: provider, url: url, inputFile: fileURL, format: format)
+        return try await run(command: command)
+    }
+
+    /// Restores a backup into a *different* environment's database — e.g. copy
+    /// production data into staging. The backup file stays where it is; only the
+    /// target connection changes. Useful for seeding a lower environment from a
+    /// snapshot taken elsewhere.
+    static func restoreCrossEnvironment(from fileURL: URL, toDatabaseURL targetURL: String) async throws -> String {
+        guard let url = URL(string: targetURL), let scheme = url.scheme,
+              let provider = Provider(urlScheme: scheme) else {
+            throw BackupError.unsupportedProvider(URL(string: targetURL)?.scheme ?? "(none)")
+        }
+        guard FileManager.default.fileExists(atPath: fileURL.path) else {
+            throw BackupError.restoreFailed("Backup file not found.")
+        }
+        let format = BackupFormat.format(for: fileURL, provider: provider)
+        let command = try restoreCommand(provider: provider, url: url, inputFile: fileURL, format: format)
         return try await run(command: command)
     }
 
@@ -146,14 +197,25 @@ enum BackupService {
 
     // MARK: Command building
 
-    private static func backupCommand(provider: Provider, url: URL, outputFile: URL) throws -> ShellCommand {
+    private static func backupCommand(provider: Provider, url: URL, outputFile: URL, format: BackupFormat, schemaOnly: Bool) throws -> ShellCommand {
+        // Postgres-only refinements applied when backing up just the public
+        // schema (skip Prisma's migration history so the snapshot is portable).
+        let schemaArgs: [String] = schemaOnly ? ["--schema=public", "--exclude-table-data=_prisma_migrations"] : []
         switch provider {
         case .postgres:
-            // Prefer connection string form (works with pg_dump 16+).
-            return ShellCommand(
-                executable: "/bin/sh",
-                arguments: ["-c", "pg_dump \"\(url.absoluteString)\" -F c -f \"\(outputFile.path)\""]
-            )
+            switch format {
+            case .compressed:
+                // Prefer connection string form (works with pg_dump 16+).
+                return ShellCommand(
+                    executable: "/bin/sh",
+                    arguments: ["-c", "pg_dump \"\(url.absoluteString)\" -F c \(schemaArgs.joined(separator: " ")) -f \"\(outputFile.path)\""]
+                )
+            case .plainSQL:
+                return ShellCommand(
+                    executable: "/bin/sh",
+                    arguments: ["-c", "pg_dump \"\(url.absoluteString)\" \(schemaArgs.joined(separator: " ")) -f \"\(outputFile.path)\""]
+                )
+            }
         case .mysql:
             guard let host = url.host, let port = url.port else { throw BackupError.missingURL }
             // Credentials are passed via MYSQL_PWD in the process environment
@@ -174,13 +236,24 @@ enum BackupService {
         }
     }
 
-    private static func restoreCommand(provider: Provider, url: URL, inputFile: URL) throws -> ShellCommand {
+    private static func restoreCommand(provider: Provider, url: URL, inputFile: URL, format: BackupFormat) throws -> ShellCommand {
         switch provider {
         case .postgres:
-            return ShellCommand(
-                executable: "/bin/sh",
-                arguments: ["-c", "pg_restore --clean --if-exists -d \"\(url.absoluteString)\" \"\(inputFile.path)\""]
-            )
+            switch format {
+            case .compressed:
+                return ShellCommand(
+                    executable: "/bin/sh",
+                    arguments: ["-c", "pg_restore --clean --if-exists -d \"\(url.absoluteString)\" \"\(inputFile.path)\""]
+                )
+            case .plainSQL:
+                // psql continues past errors (ON_ERROR_STOP=0) so version-skew
+                // between dump source and target (e.g. a SET for a parameter
+                // the target doesn't know) doesn't abort the whole import.
+                return ShellCommand(
+                    executable: "/bin/sh",
+                    arguments: ["-c", "psql -v ON_ERROR_STOP=0 -d \"\(url.absoluteString)\" -f \"\(inputFile.path)\""]
+                )
+            }
         case .mysql:
             guard let host = url.host, let port = url.port else { throw BackupError.missingURL }
             var cmd = ShellCommand(
@@ -254,9 +327,12 @@ struct BackupResult: Identifiable {
 }
 
 extension BackupService.Provider {
-    var fileExtension: String {
-        switch self {
-        case .postgres: "dump"
+    /// File extension for a fresh backup of this provider in the given format.
+    /// Postgres distinguishes compressed (`.dump`) from plain (`.sql`); the
+    /// others always emit SQL text.
+    static func fileExtension(for provider: BackupService.Provider, format: BackupFormat) -> String {
+        switch provider {
+        case .postgres: format == .compressed ? "dump" : "sql"
         case .mysql, .sqlite: "sql"
         }
     }
@@ -274,5 +350,15 @@ extension BackupService.Provider {
             }
         }
         return url.pathExtension == "dump" ? .postgres : .mysql
+    }
+}
+
+extension BackupFormat {
+    /// Infers the on-disk format of an existing backup file for a given
+    /// provider, so restore can pick the right tool (`pg_restore` vs `psql`).
+    /// Postgres `.dump` → compressed; everything else (`.sql`) → plainSQL.
+    static func format(for url: URL, provider: BackupService.Provider) -> BackupFormat {
+        guard provider == .postgres else { return .plainSQL }
+        return url.pathExtension == "dump" ? .compressed : .plainSQL
     }
 }

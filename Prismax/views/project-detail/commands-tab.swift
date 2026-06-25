@@ -281,7 +281,7 @@ struct CommandEditorSheet: View {
                         Text(c.label).tag(c)
                     }
                 }
-                .pickerStyle(.segmented)
+                .pickerStyle(.menu)
                 .labelsHidden()
             }
 

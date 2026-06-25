@@ -14,9 +14,27 @@ struct BackupsTab: View {
     @State private var restoreTarget: BackupResult?
     @State private var scheduleEnabled = false
     @State private var scheduleFrequency: BackupFrequency = .daily
+    @State private var backupFormat: BackupFormat = .compressed
+    @State private var schemaOnly = false
+    @State private var crossEnvTarget: BackupResult?
+    @State private var crossEnvDestination: EnvProfile?
 
     private var databaseURL: String? {
         environment.variables
+            .first(where: { $0.key.uppercased() == "DATABASE_URL" })
+            .flatMap { try? KeychainService.get(account: $0.keychainAccount) }
+    }
+
+    /// Other environments in this project that have a DATABASE_URL, used as
+    /// destinations for cross-environment restore.
+    private var crossDestinations: [EnvProfile] {
+        project.environments
+            .filter { $0.id != environment.id && databaseURLString(for: $0) != nil }
+            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
+
+    private func databaseURLString(for env: EnvProfile) -> String? {
+        env.variables
             .first(where: { $0.key.uppercased() == "DATABASE_URL" })
             .flatMap { try? KeychainService.get(account: $0.keychainAccount) }
     }
@@ -45,6 +63,24 @@ struct BackupsTab: View {
         } message: {
             if let target = restoreTarget {
                 Text("Restoring \(target.fileURL.lastPathComponent) will overwrite the current **\(environment.name)** database. This cannot be undone.")
+            }
+        }
+        .alert("Restore to Another Environment?", isPresented: Binding(
+            get: { crossEnvTarget != nil },
+            set: { if !$0 { crossEnvTarget = nil; crossEnvDestination = nil } }
+        )) {
+            Button("Cancel", role: .cancel) {
+                crossEnvTarget = nil
+                crossEnvDestination = nil
+            }
+            Button("Restore", role: .destructive) {
+                if let target = crossEnvTarget { performCrossEnvRestore(target) }
+                crossEnvTarget = nil
+                crossEnvDestination = nil
+            }
+        } message: {
+            if let target = crossEnvTarget, let dest = crossEnvDestination {
+                Text("Restoring \(target.fileURL.lastPathComponent) into **\(dest.name)** will overwrite that database. This cannot be undone.")
             }
         }
     }
@@ -88,6 +124,8 @@ struct BackupsTab: View {
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
                 .disabled(isBackingUp)
+
+                backupOptionsSection
             } else {
                 VStack(alignment: .leading, spacing: 6) {
                     Label("No DATABASE_URL", systemImage: "exclamationmark.triangle")
@@ -153,6 +191,41 @@ struct BackupsTab: View {
         }
     }
 
+    // MARK: Backup options
+
+    /// Format + scope options for manual backups. Postgres gains a compressed
+    /// vs plain-SQL choice and a "public schema only" toggle (skips Prisma's
+    /// migration history) for portable data snapshots.
+    private var backupOptionsSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Picker("Format", selection: $backupFormat) {
+                ForEach(BackupFormat.allCases) { f in Text(f.label).tag(f) }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .disabled(!providerSupportsFormatChoice)
+
+            Toggle(isOn: $schemaOnly) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Public schema only")
+                        .font(.rowPrimary)
+                    Text("Skip `_prisma_migrations` — portable snapshot of table data (Postgres).")
+                        .font(.rowSecondary)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .disabled(!providerSupportsSchemaOnly)
+        }
+    }
+
+    /// Whether the current DB supports the compressed-vs-plain choice (Postgres).
+    private var providerSupportsFormatChoice: Bool {
+        guard let url = databaseURL, let scheme = URL(string: url)?.scheme else { return false }
+        return ["postgresql", "postgres"].contains(scheme.lowercased())
+    }
+
+    private var providerSupportsSchemaOnly: Bool { providerSupportsFormatChoice }
+
     // MARK: List
 
     private var listSection: some View {
@@ -180,10 +253,17 @@ struct BackupsTab: View {
             } else {
                 VStack(spacing: 6) {
                     ForEach(backups) { backup in
-                        BackupRow(backup: backup,
-                                  onRestore: { restoreTarget = backup },
-                                  onReveal: { BackupService.reveal(fileURL: backup.fileURL) },
-                                  onDelete: { delete(backup) })
+                        BackupRow(
+                            backup: backup,
+                            onRestore: { restoreTarget = backup },
+                            onReveal: { BackupService.reveal(fileURL: backup.fileURL) },
+                            onDelete: { delete(backup) },
+                            crossDestinations: crossDestinations,
+                            onCrossEnvRestore: { dest in
+                                crossEnvTarget = backup
+                                crossEnvDestination = dest
+                            }
+                        )
                     }
                 }
             }
@@ -222,7 +302,9 @@ struct BackupsTab: View {
                     databaseURL: url,
                     project: project.id,
                     environment: environment.id,
-                    environmentName: environment.name
+                    environmentName: environment.name,
+                    format: backupFormat,
+                    schemaOnly: schemaOnly
                 )
                 await MainActor.run {
                     isBackingUp = false
@@ -262,6 +344,31 @@ struct BackupsTab: View {
         }
     }
 
+    /// Restores `backup` into a different environment's database
+    /// (`crossEnvDestination`), leaving the source file in place.
+    private func performCrossEnvRestore(_ backup: BackupResult) {
+        guard let dest = crossEnvDestination,
+              let targetURL = databaseURLString(for: dest) else { return }
+        isRestoring = true
+        statusMessage = nil
+        Task {
+            do {
+                _ = try await BackupService.restoreCrossEnvironment(from: backup.fileURL, toDatabaseURL: targetURL)
+                await MainActor.run {
+                    isRestoring = false
+                    statusMessage = "Restored into \(dest.name)."
+                    statusError = false
+                }
+            } catch {
+                await MainActor.run {
+                    isRestoring = false
+                    statusMessage = error.localizedDescription
+                    statusError = true
+                }
+            }
+        }
+    }
+
     private func delete(_ backup: BackupResult) {
         try? BackupService.delete(fileURL: backup.fileURL)
         refresh()
@@ -273,6 +380,8 @@ private struct BackupRow: View {
     let onRestore: () -> Void
     let onReveal: () -> Void
     let onDelete: () -> Void
+    let crossDestinations: [EnvProfile]
+    let onCrossEnvRestore: (EnvProfile) -> Void
 
     var body: some View {
         HStack(spacing: 12) {
@@ -299,6 +408,18 @@ private struct BackupRow: View {
                 .foregroundStyle(.secondary)
             }
             Spacer()
+            if !crossDestinations.isEmpty {
+                Menu {
+                    ForEach(crossDestinations) { dest in
+                        Button(dest.name) { onCrossEnvRestore(dest) }
+                    }
+                } label: {
+                    Image(systemName: "arrow.left.arrow.right")
+                        .font(.system(size: 11))
+                }
+                .buttonStyle(.borderless)
+                .help("Restore into another environment")
+            }
             Button("Restore", systemImage: "arrow.uturn.backward", action: onRestore)
                 .buttonStyle(.bordered)
                 .controlSize(.small)

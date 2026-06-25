@@ -11,12 +11,18 @@ enum DefaultCommands {
     }
 
     static let templates: [Template] = [
+        // Setup
+        .init(name: "Init", prismaArgs: "init", category: .setup, symbolName: "plus.app"),
+        .init(name: "Bootstrap", prismaArgs: "bootstrap", category: .setup, symbolName: "shippingbox"),
+        .init(name: "Dev", prismaArgs: "dev", category: .setup, symbolName: "play.circle"),
+
         // Migrations
         .init(name: "Migrate Dev", prismaArgs: "migrate dev", category: .migrate, symbolName: "hammer"),
         .init(name: "Migrate Deploy", prismaArgs: "migrate deploy", category: .migrate, symbolName: "arrow.up.square"),
         .init(name: "Migrate Status", prismaArgs: "migrate status", category: .migrate, symbolName: "info.circle"),
         .init(name: "Migrate Reset", prismaArgs: "migrate reset", category: .migrate, symbolName: "arrow.counterclockwise"),
         .init(name: "Migrate Resolve", prismaArgs: "migrate resolve", category: .migrate, symbolName: "checkmark.circle.badge.questionmark"),
+        .init(name: "Migrate Diff", prismaArgs: "migrate diff", category: .migrate, symbolName: "arrow.left.and.right.square"),
 
         // Database
         .init(name: "DB Push", prismaArgs: "db push", category: .database, symbolName: "arrowshape.up.fill"),
@@ -26,11 +32,27 @@ enum DefaultCommands {
 
         // Generate
         .init(name: "Generate Client", prismaArgs: "generate", category: .generate, symbolName: "wand.and.stars"),
-        .init(name: "Validate Schema", prismaArgs: "validate", category: .generate, symbolName: "checkmark.shield"),
+
+        // Schema
+        .init(name: "Validate Schema", prismaArgs: "validate", category: .schema, symbolName: "checkmark.shield"),
+        .init(name: "Format Schema", prismaArgs: "format", category: .schema, symbolName: "text.alignleft"),
 
         // Studio
         .init(name: "Open Studio", prismaArgs: "studio", category: .studio, symbolName: "macwindow"),
-        .init(name: "Format Schema", prismaArgs: "format", category: .studio, symbolName: "text.alignleft"),
+
+        // Postgres
+        .init(name: "Postgres Link", prismaArgs: "postgres link", category: .postgres, symbolName: "link"),
+
+        // Platform
+        .init(name: "Platform Status", prismaArgs: "platform status", category: .platform, symbolName: "serverlever"),
+
+        // MCP
+        .init(name: "Start MCP Server", prismaArgs: "mcp", category: .mcp, symbolName: "network"),
+
+        // Diagnostics
+        .init(name: "Version", prismaArgs: "version", category: .diagnostics, symbolName: "info.circle"),
+        .init(name: "Debug", prismaArgs: "debug", category: .diagnostics, symbolName: "ladybug"),
+        .init(name: "Telemetry", prismaArgs: "telemetry", category: .diagnostics, symbolName: "chart.bar"),
     ]
 
     /// Creates a fresh set of `Command` instances for a new project.

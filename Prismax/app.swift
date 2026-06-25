@@ -33,6 +33,9 @@ struct PrismaXApp: App {
                     runService.attach(terminalManager)
                     // Restore persisted backup schedules now that SwiftData is up.
                     BackupScheduler.shared.restoreSchedules(modelContext: modelContainer.mainContext)
+                    // Top up each project with any new default commands (once
+                    // per default-set revision). Additive; preserves user edits.
+                    CommandSeeder.topUpIfNeeded(in: modelContainer.mainContext)
                 }
                 .frame(minWidth: 960, minHeight: 640)
                 .tint(Theme.accent)
