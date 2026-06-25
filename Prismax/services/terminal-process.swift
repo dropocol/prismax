@@ -38,6 +38,10 @@ final class TerminalProcess {
     /// view uses it to re-arm its output pump, so a re-spawned shell's output
     /// reaches the UI without waiting for an unrelated SwiftUI re-render.
     var onRespawn: (@MainActor () -> Void)?
+    /// Called on the main actor when the user requests a clear. The terminal
+    /// view resets xterm.js (screen + scrollback); this object's `history` is
+    /// cleared in tandem so the cleared state survives a rebind/restart.
+    var onClear: (@MainActor () -> Void)?
 
     /// In-memory scrollback of all bytes emitted by this shell, kept so a
     /// freshly (re)bound xterm.js webview can be seeded with prior output.
@@ -163,6 +167,21 @@ final class TerminalProcess {
             emit(chunk.base64EncodedString())
             offset = end
         }
+    }
+
+    /// Wipes the scrollback buffer. Pair with a JS `term.reset()` (exposed as
+    /// `window.clearTerminal`) to clear both the visible screen and scrollback
+    /// for real — used by the terminal panel's "clear" button.
+    func clearHistory() {
+        history.removeAll(keepingCapacity: true)
+    }
+
+    /// Clears the terminal: wipes scrollback history and asks the bound xterm.js
+    /// view (via `onClear`) to hard-reset. The screen and scrollback are both
+    /// gone for real, and stay gone across rebinds/restarts.
+    func clear() {
+        clearHistory()
+        onClear?()
     }
 
     private func startReading() {

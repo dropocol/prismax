@@ -12,6 +12,11 @@ struct TabBar: View {
                 tabButton(tab)
             }
         }
+        // Fixed height keeps the bar compact (it otherwise expands to fill any
+        // vertical space the parent offers). The bottom hairline runs the full
+        // width and the selected tab's underline sits directly on top of it, so
+        // the indicator reads as touching the bottom edge with no gap.
+        .frame(height: 30)
         .overlay(alignment: .bottom) {
             Rectangle()
                 .fill(Theme.hairline)
@@ -24,6 +29,7 @@ struct TabBar: View {
         return Button {
             withAnimation(.snappy(duration: 0.22)) { selection = tab }
         } label: {
+            // label row pinned to the top so the underline stays at the bottom.
             VStack(spacing: 5) {
                 HStack(spacing: 5) {
                     Image(systemName: isSelected ? tab.symbolFilled : tab.symbol)
@@ -33,7 +39,10 @@ struct TabBar: View {
                 }
                 .foregroundStyle(isSelected ? Theme.accent : Color.secondary)
                 .padding(.top, 6)
-                // Matching underline indicator.
+                Spacer(minLength: 0)
+                // Underline indicator. Drawn at 2pt and pulled down 0.5pt so
+                // its bottom edge lands flush on the bar's bottom hairline,
+                // making the selected tab read as connected to the divider.
                 ZStack {
                     if isSelected {
                         Capsule()
@@ -44,6 +53,7 @@ struct TabBar: View {
                         Capsule().fill(.clear).frame(height: 2)
                     }
                 }
+                .offset(y: 0.5)
             }
             .contentShape(Rectangle())
             .frame(maxWidth: .infinity)

@@ -183,6 +183,23 @@ final class TerminalManager {
         return session
     }
 
+    /// Opens a new tab AND spawns its shell against `env`, so the tab is live
+    /// immediately (used by the terminal panel's "+" button). The new session
+    /// becomes the active one.
+    @discardableResult
+    func openAndRunSession(for project: Project, environment env: EnvProfile, title: String) -> TerminalSession {
+        let session = openSession(for: project, title: title)
+        let resolved = EnvironmentResolver.resolve(project: project, environment: env)
+        do {
+            try session.process.spawn(workingDirectory: project.commandDirectory, environment: resolved)
+            session.environmentID = env.id
+            session.resolvedEnvironment = resolved
+        } catch {
+            print("Terminal spawn failed: \(error)")
+        }
+        return session
+    }
+
     /// Makes the given session the active (first) one for its project.
     func makeActive(project: Project, session sessionID: UUID) {
         guard var list = sessionsByProject[project.id],

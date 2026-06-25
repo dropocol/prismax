@@ -51,7 +51,7 @@ struct TerminalPanel: View {
                     .frame(width: 7, height: 7)
                 Image(systemName: "terminal")
                     .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.primary)
             }
             Divider().frame(height: 14)
             Text(project.name)
@@ -66,48 +66,52 @@ struct TerminalPanel: View {
             Spacer()
             // New terminal tab (only meaningful in perCommand mode).
             if terminalMode == .perCommand {
-                Button {
-                    terminalManager.openSession(for: project, title: "Shell")
-                } label: {
-                    Image(systemName: "plus")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary)
+                toolbarButton(systemName: "plus", help: "New terminal tab") {
+                    terminalManager.openAndRunSession(for: project, environment: environment, title: "Shell")
                 }
-                .buttonStyle(.borderless)
-                .help("New terminal tab")
             }
-            Button {
-                process.send("clear\n")
-            } label: {
-                Image(systemName: "trash")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.secondary)
+            toolbarButton(systemName: "trash", help: "Clear terminal (screen + scrollback)") {
+                process.clear()
             }
-            .buttonStyle(.borderless)
-            .help("Clear")
-            Button {
+            toolbarButton(systemName: "arrow.clockwise", help: "Restart shell") {
                 terminalManager.restart(for: project, environment: environment)
-            } label: {
-                Image(systemName: "arrow.clockwise")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.secondary)
             }
-            .buttonStyle(.borderless)
-            .help("Restart shell")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 7)
         .background(.regularMaterial)
     }
 
+    /// A flat, clearly-legible toolbar icon button with a real hit target.
+    private func toolbarButton(systemName: String, help: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.primary)
+                .frame(width: 22, height: 22)
+                .background(
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(Color.primary.opacity(0.07))
+                )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(help)
+    }
+
     /// Horizontal scrollable tab strip. One chip per session; click to activate,
-    /// × to close. Active tab is highlighted with the accent.
+    /// × to close. Tabs keep a stable creation order so selecting one doesn't
+    /// shuffle the row — only the active highlight moves. Active tab is the
+    /// first entry of the manager's session list (it reorders on activation).
     private var tabStrip: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
+        // Stable display order by creation time (oldest → newest) so tabs don't
+        // jump around when one is activated.
+        let ordered = sessions.sorted { $0.createdAt < $1.createdAt }
+        let activeID = sessions.first?.id
+        return ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 2) {
-                ForEach(sessions) { session in
-                    let isActive = sessions.first?.id == session.id
-                    tabChip(session: session, isActive: isActive)
+                ForEach(ordered) { session in
+                    tabChip(session: session, isActive: activeID == session.id)
                 }
             }
             .padding(.horizontal, 8)
@@ -130,9 +134,10 @@ struct TerminalPanel: View {
                 } label: {
                     Image(systemName: "xmark")
                         .font(.system(size: 8, weight: .bold))
-                        .foregroundStyle(.tertiary)
+                        .frame(width: 14, height: 14)
+                        .contentShape(Rectangle())
                 }
-                .buttonStyle(.borderless)
+                .buttonStyle(.plain)
                 .help("Close tab")
             }
         }

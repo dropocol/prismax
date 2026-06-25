@@ -80,6 +80,19 @@
     // Focus the terminal on click/ready.
     term.focus();
     window.focusTerminal = function() { term.focus(); };
+
+    // Clear the terminal: drops the scrollback buffer above the current prompt
+    // but keeps the prompt line (so the user still sees `➜ dir git:(branch)`
+    // and can keep typing). This mirrors what the `clear` command does, but
+    // without typing/echoing anything into the shell. Called by Swift when the
+    // user hits the "clear" toolbar button.
+    window.clearTerminal = function() {
+      if (typeof term.clear === 'function') {
+        term.clear();
+      } else {
+        term.reset();
+      }
+    };
   </script>
 </body>
 </html>

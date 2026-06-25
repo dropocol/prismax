@@ -49,15 +49,33 @@ enum ProcessRunner {
         )
     }
 
-    /// Runs a shell command string via an interactive login zsh in `directory`.
+    /// Runs a shell command string via a **login** zsh in `directory`.
     /// Use this when the command must resolve through the user's PATH
     /// (pnpm/npx/bunx/yarn), which a GUI-launched app doesn't inherit by default.
-    /// Uses -lic so BOTH .zprofile AND .zshrc are sourced (nvm, fnm, volta,
-    /// pnpm's installer, bun, and deno add themselves to PATH in .zshrc).
+    ///
+    /// Uses a login NON-interactive shell (`-l -c`): this sources `.zprofile`
+    /// (and `.zshrc`'s PATH contributions that aren't gated on interactivity)
+    /// WITHOUT sourcing the interactive `.zshrc` banner/prompt code — so custom
+    /// prompts, "ZK-Scripts loaded!" style banners, and other interactive-only
+    /// output never leak into the captured command output.
+    ///
+    /// Node version managers (nvm, fnm, volta) typically wire themselves up in
+    /// `.zshrc`, which a non-interactive shell skips — so we source the common
+    /// ones explicitly to make `npx`/`node` resolvable. The sourced snippets are
+    /// all no-ops if the tool isn't installed.
     static func run(shellCommand: String, directory: String) async -> Result {
-        await run(
+        // Prepend bootstrap lines that add node's bin dir to PATH. Each is
+        // guarded so it silently no-ops when the version manager is absent.
+        let bootstrap = """
+        [ -s \"$HOME/.nvm/nvm.sh\" ] && . \"$HOME/.nvm/nvm.sh\" 2>/dev/null
+        command -v fnm >/dev/null 2>&1 && eval \"$(fnm env --shell zsh 2>/dev/null)\"
+        [ -s \"$HOME/.volta/bin\" ] && export PATH=\"$HOME/.volta/bin:$PATH\"
+        [ -s \"$HOME/.bun/bin\" ] && export PATH=\"$HOME/.bun/bin:$PATH\"
+        """
+        let full = bootstrap + "\n" + shellCommand
+        return await run(
             executable: "/bin/zsh",
-            arguments: ["-lic", shellCommand],
+            arguments: ["-l", "-c", full],
             directory: directory,
             environment: ["HOME": ProcessInfo.processInfo.environment["HOME"] ?? NSHomeDirectory()]
         )

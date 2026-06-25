@@ -11,8 +11,31 @@ struct ProjectDetailView: View {
     @State private var selectedTab: ProjectTab = .commands
     @State private var selectedEnvironmentID: UUID?
     @State private var pendingRun: PendingRun?
-    @State private var terminalHeight: CGFloat = 240
-    @State private var terminalWidth: CGFloat = 460
+    // Stored as Double (UserDefaults/AppStorage don't support CGFloat); bound
+    // to the resize dividers as CGFloat so the terminal size persists across
+    // launches instead of resetting to the defaults each time.
+    @AppStorage("terminalHeight") private var terminalHeightRaw: Double = 240
+    @AppStorage("terminalWidth") private var terminalWidthRaw: Double = 460
+
+    private var terminalHeight: CGFloat {
+        get { CGFloat(terminalHeightRaw) }
+        set { terminalHeightRaw = Double(newValue) }
+    }
+
+    private var terminalWidth: CGFloat {
+        get { CGFloat(terminalWidthRaw) }
+        set { terminalWidthRaw = Double(newValue) }
+    }
+
+    /// CGFloat bindings backed by the Double @AppStorage values, for the resize
+    /// dividers (which take `Binding<CGFloat>`).
+    private var heightBinding: Binding<CGFloat> {
+        Binding(get: { CGFloat(terminalHeightRaw) }, set: { terminalHeightRaw = Double($0) })
+    }
+
+    private var widthBinding: Binding<CGFloat> {
+        Binding(get: { CGFloat(terminalWidthRaw) }, set: { terminalWidthRaw = Double($0) })
+    }
     @AppStorage("terminalPlacement") private var placementRaw: String = TerminalPlacement.bottom.rawValue
 
     private var placement: TerminalPlacement {
@@ -75,7 +98,7 @@ struct ProjectDetailView: View {
             VStack(spacing: 0) {
                 tabContent(for: env)
                 ResizeDivider(orientation: .horizontal,
-                              value: $terminalHeight,
+                              value: heightBinding,
                               range: 120...600)
                 terminalPanel(for: env)
                     .frame(maxWidth: .infinity)
@@ -86,7 +109,7 @@ struct ProjectDetailView: View {
                 tabContent(for: env)
                     .frame(maxWidth: .infinity)
                 ResizeDivider(orientation: .vertical,
-                              value: $terminalWidth,
+                              value: widthBinding,
                               range: 280...2000)
                 terminalPanel(for: env)
                     .frame(width: terminalWidth, alignment: .leading)
@@ -170,6 +193,9 @@ struct ProjectDetailView: View {
                 }
             }
 
+            // Tab bar is the last row of the header; its own bottom hairline
+            // doubles as the header/content divider, so a selected tab's
+            // underline sits directly on that divider with no gap.
             HStack(spacing: 12) {
                 TabBar(selection: $selectedTab)
                 Spacer(minLength: 0)
@@ -178,13 +204,7 @@ struct ProjectDetailView: View {
         }
         .padding(.horizontal, 18)
         .padding(.top, 16)
-        .padding(.bottom, 14)
         .background(.regularMaterial)
-        .overlay(alignment: .bottom) {
-            Rectangle()
-                .fill(Theme.hairline)
-                .frame(height: 0.5)
-        }
     }
 
     @ViewBuilder

@@ -87,6 +87,7 @@ struct TerminalView: NSViewRepresentable {
             self.process = process
             super.init()
             armRespawnCallback()
+            armClearCallback()
         }
 
         /// Wires `process.onRespawn` so that when this shell is re-spawned (e.g.
@@ -103,6 +104,16 @@ struct TerminalView: NSViewRepresentable {
             }
         }
 
+        /// Wires `process.onClear` so the "clear" button hard-resets xterm.js
+        /// (screen + scrollback). History is cleared on the process side too, so
+        /// the cleared state survives a rebind/restart.
+        func armClearCallback() {
+            process.onClear = { [weak self] in
+                guard let self, self.webViewReady else { return }
+                self.webView?.evaluateJavaScript("window.clearTerminal && window.clearTerminal();", completionHandler: nil)
+            }
+        }
+
         /// Re-binds this Coordinator to a new `TerminalProcess` (project switch
         /// or tab switch). Seeds the existing webview with the new process's
         /// accumulated scrollback and starts a fresh live output pump.
@@ -112,6 +123,7 @@ struct TerminalView: NSViewRepresentable {
             pumpIsAlive = false
             process = newProcess
             armRespawnCallback()
+            armClearCallback()
 
             guard webViewReady else { return }
 

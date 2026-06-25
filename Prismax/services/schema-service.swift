@@ -90,12 +90,17 @@ enum SchemaService {
             directory: snapshot.commandDirectory
         )
 
-        let pending = countMatches(of: "not yet applied", in: result.combinedOutput)
-        let applied = countMatches(of: "Following migration", in: result.combinedOutput)
+        // The command runs through the user's login shell, which can occasionally
+        // emit banner/echo noise from .zprofile or a version manager (e.g.
+        // "🚀 ZK-Scripts loaded!"). Strip lines that are obviously shell startup
+        // chatter so only real prisma output reaches the UI.
+        let cleaned = Self.stripShellNoise(from: result.combinedOutput)
+        let pending = countMatches(of: "not yet applied", in: cleaned)
+        let applied = countMatches(of: "Following migration", in: cleaned)
 
         return MigrateStatus(
             succeeded: result.isSuccess,
-            output: result.combinedOutput,
+            output: cleaned,
             pendingCount: pending,
             appliedCount: applied,
             databaseURLMasked: maskURL(schema.datasourceURL)
@@ -103,6 +108,42 @@ enum SchemaService {
     }
 
     // MARK: Helpers
+
+    /// Removes shell-startup noise (banners, echo'd config paths) from captured
+    /// command output so the UI shows only real tool output. Drops any leading
+    /// lines that contain emoji or common banner markers ("loaded!", "Config:",
+    /// "Tools:"), then trims leading blanks.
+    private static func stripShellNoise(from output: String) -> String {
+        let lines = output.split(separator: "\n", omittingEmptySubsequences: false)
+        var kept = [String]()
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty { continue }
+            // Emoji / symbol-prefixed banner lines.
+            if trimmed.unicodeScalars.contains(where: { $0.properties.generalCategory == .otherSymbol || Self.isEmoji($0) }) {
+                continue
+            }
+            // Common .zshrc/.zprofile banner fragments.
+            let lower = trimmed.lowercased()
+            if lower.contains("loaded!") || lower.hasPrefix("config:") || lower.hasPrefix("tools:") {
+                continue
+            }
+            kept.append(String(line))
+        }
+        return kept.joined(separator: "\n")
+    }
+
+    /// True if the scalar is in a common emoji range (covers pictographs,
+    /// emoji presentation base chars, and keycaps — enough to flag banner lines).
+    private static func isEmoji(_ scalar: Unicode.Scalar) -> Bool {
+        let v = scalar.value
+        // Misc Symbols & Pictographs, Emoticons, Transport/Map, Supplemental
+        // Symbols & Pictographs, and the dingbats/arrows often used in banners.
+        return (0x1F300...0x1FAFF).contains(v)
+            || (0x2600...0x27BF).contains(v)
+            || (0x2190...0x21FF).contains(v)
+            || (0x2B00...0x2BFF).contains(v)
+    }
 
     private static func countMatches(of needle: String, in text: String) -> Int {
         var count = 0
