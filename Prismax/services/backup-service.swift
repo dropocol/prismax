@@ -248,25 +248,43 @@ enum BackupService {
 
     // MARK: Shell
 
-    /// Executes the shell command via a **login** zsh so that tools installed
-    /// by the user (`pg_dump`, `psql`, `mysqldump` via Postgres.app, Homebrew,
-    /// DBngin, …) are found on PATH. A GUI app inherits only a minimal PATH
-    /// (`/usr/bin:/bin:…`), so a raw `/bin/sh` fails with "command not found".
+    /// Directories where DB CLI tools (`pg_dump`, `psql`, `mysqldump`, `sqlite3`)
+    /// commonly live. A GUI app inherits a minimal PATH (`/usr/bin:/bin:…`) and a
+    /// login non-interactive zsh only sources `/etc/paths.d` + `.zprofile` —
+    /// neither of which includes Homebrew (`/opt/homebrew/bin`), Postgres.app, or
+    /// `libpq` on a typical setup, since those are added in interactive `.zshrc`.
+    /// We prepend any of these that exist so the tools resolve regardless.
+    private static let dbToolPathDirs: [String] = [
+        "/opt/homebrew/bin",                                   // Apple Silicon Homebrew
+        "/opt/homebrew/opt/libpq/bin",                         // Homebrew libpq (pg tools)
+        "/usr/local/bin",                                      // Intel Homebrew
+        "/usr/local/opt/libpq/bin",
+        "/Applications/Postgres.app/Contents/Versions/Latest/bin", // Postgres.app
+        "/Library/PostgreSQL/17/bin",                          // EnterpriseDB installers
+        "/Library/PostgreSQL/16/bin",
+        "/Library/PostgreSQL/15/bin",
+        "/Library/PostgreSQL/14/bin",
+    ]
+
+    /// Executes the shell command via a **login** zsh with DB tool directories
+    /// prepended to PATH, so `pg_dump`/`psql`/`mysqldump`/`sqlite3` (installed via
+    /// Homebrew, Postgres.app, libpq, …) are found even though a GUI app inherits
+    /// only a minimal PATH. The resolved project environment is overlaid on top so
+    /// the environment's `DATABASE_URL` / `MYSQL_PWD` reach the tool.
     ///
     /// Login but non-interactive (`-l -c`): loads `.zprofile` PATH contributions
-    /// without sourcing interactive `.zshrc` banners. The resolved environment
-    /// from `EnvironmentResolver` is overlaid on top of the login shell's env so
-    /// the project's `DATABASE_URL` / `MYSQL_PWD` reach the tool.
+    /// without sourcing interactive `.zshrc` banners/prompts.
     @discardableResult
     static func run(command: ShellCommand) async throws -> String {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/zsh")
         process.arguments = ["-l", "-c", command.commandLine]
 
-        // Start from the login shell's environment, overlay the resolved
-        // project environment (DB URL, MYSQL_PWD, …).
+        // Start from the inherited env, overlay the resolved project env, then
+        // prepend any DB tool dirs that exist so PATH finds the CLI.
         var env = ProcessInfo.processInfo.environment
         for (k, v) in command.extraEnvironment { env[k] = v }
+        env["PATH"] = Self.augmentedPATH(base: env["PATH"] ?? "")
         process.environment = env
 
         let pipe = Pipe()
@@ -283,6 +301,15 @@ enum BackupService {
             throw BackupError.launchFailed("Exit \(process.terminationStatus): \(output)")
         }
         return output
+    }
+
+    /// Builds a PATH string with existing DB tool directories (those that exist
+    /// on disk) prepended to `base`, de-duplicated.
+    private static func augmentedPATH(base: String) -> String {
+        let fm = FileManager.default
+        var seen = Set<String>()
+        let prepend = dbToolPathDirs.filter { fm.isExecutableFile(atPath: $0) && seen.insert($0).inserted }
+        return (prepend + [base]).joined(separator: ":")
     }
 
     private static func timestamp() -> String {
