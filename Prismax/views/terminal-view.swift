@@ -39,7 +39,7 @@ struct TerminalView: NSViewRepresentable {
             let accessURL = Bundle.main.resourceURL ?? htmlURL.deletingLastPathComponent()
             webView.loadFileURL(htmlURL, allowingReadAccessTo: accessURL)
         } else {
-            print("⚠️ Prismax: index.html not found in bundle")
+            print("⚠️ PrismaX: index.html not found in bundle")
         }
         coordinator.webView = webView
         return webView
@@ -177,11 +177,11 @@ struct TerminalView: NSViewRepresentable {
         // MARK: Navigation
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-            print("Prismax: terminal HTML loaded")
+            print("PrismaX: terminal HTML loaded")
             webViewReady = true
             webView.evaluateJavaScript("typeof Terminal !== 'undefined' && typeof window.writeToTerminal === 'function'") { result, _ in
                 if let ok = result as? Bool, ok {
-                    print("Prismax: xterm.js initialized OK")
+                    print("PrismaX: xterm.js initialized OK")
                     // Seed the fresh webview with this process's accumulated
                     // scrollback before attaching the live pump, so a recreated
                     // view shows prior output instead of going blank.
@@ -192,13 +192,13 @@ struct TerminalView: NSViewRepresentable {
                     // Focus the terminal so it accepts keystrokes immediately.
                     webView.evaluateJavaScript("window.focusTerminal && window.focusTerminal();")
                 } else {
-                    print("⚠️ Prismax: xterm.js did NOT initialize — scripts may have failed to load")
+                    print("⚠️ PrismaX: xterm.js did NOT initialize — scripts may have failed to load")
                 }
             }
         }
 
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-            print("⚠️ Prismax: terminal failed to load: \(error.localizedDescription)")
+            print("⚠️ PrismaX: terminal failed to load: \(error.localizedDescription)")
         }
 
         private func startOutputPump() {

@@ -30,7 +30,7 @@ enum BackupFrequency: String, CaseIterable, Identifiable, Codable {
 /// what cadence — it drives both the live `Timer`s and the persisted registry,
 /// so the UI toggle stays in sync with reality across app restarts. On launch
 /// `restoreSchedules(modelContext:)` recreates a `Timer` for every persisted
-/// entry. Backups run only while Prismax is open; a background LaunchAgent is
+/// entry. Backups run only while PrismaX is open; a background LaunchAgent is
 /// planned for a future update.
 @MainActor
 final class BackupScheduler {

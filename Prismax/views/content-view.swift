@@ -61,12 +61,14 @@ struct ContentView: View {
                         RoundedRectangle(cornerRadius: 18, style: .continuous)
                             .strokeBorder(Theme.accent.opacity(0.18), lineWidth: 0.5)
                     )
-                Image(systemName: "hexagon.fill")
-                    .font(.system(size: 30, weight: .semibold))
-                    .foregroundStyle(Theme.accent)
+                Image("app_icon")
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: 52, height: 52)
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
             }
             .softShadow(radius: 12, y: 6, opacity: 0.10)
-            Text("Prismax")
+            Text("PrismaX")
                 .font(.system(size: 20, weight: .semibold))
                 .foregroundStyle(.primary)
             Text("Select a project from the sidebar, or add one with ⌘N.")
@@ -92,7 +94,7 @@ struct ContentView: View {
         )
         project.commands = DefaultCommands.makeCommands()
 
-        let dev = EnvProfile(name: "development", colorHex: "#34C759", orderIndex: 0)
+        let dev = EnvProfile(name: "Development", colorHex: "#34C759", orderIndex: 0)
         dev.project = project
 
         modelContext.insert(project)

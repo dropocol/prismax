@@ -137,7 +137,7 @@ enum BackupService {
 
     static func backupDirectory(projectID: UUID, envID: UUID) -> URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("Prismax", isDirectory: true)
+            .appendingPathComponent("PrismaX", isDirectory: true)
             .appendingPathComponent("backups", isDirectory: true)
             .appendingPathComponent(projectID.uuidString, isDirectory: true)
             .appendingPathComponent(envID.uuidString, isDirectory: true)

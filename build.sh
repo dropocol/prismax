@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# build.sh — build Prismax into a distributable macOS .app (+ optional .dmg).
+# build.sh — build PrismaX into a distributable macOS .app (+ optional .dmg).
 #
 # This is for community/open-source distribution WITHOUT an Apple Developer
 # account: the app is ad-hoc signed (CODE_SIGN_IDENTITY="-") and NOT
@@ -22,13 +22,13 @@
 set -euo pipefail
 
 # ── Config ──────────────────────────────────────────────────────────────────
-PROJECT_NAME="Prismax"
-SCHEME="Prismax"
+PROJECT_NAME="PrismaX"
+SCHEME="PrismaX"
 CONFIGURATION="Release"
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BUILD_DIR="$ROOT_DIR/build"
 DIST_DIR="$ROOT_DIR/dist"
-ICONSET_DIR="$ROOT_DIR/Prismax/Resources/Assets.xcassets/AppIcon.appiconset"
+ICONSET_DIR="$ROOT_DIR/PrismaX/Resources/Assets.xcassets/AppIcon.appiconset"
 
 # ── Flags ───────────────────────────────────────────────────────────────────
 MAKE_DMG=1
@@ -67,18 +67,22 @@ mkdir -p "$DIST_DIR"
 
 # ── 1. Icon ─────────────────────────────────────────────────────────────────
 if [[ "$RENDER_ICON" == 1 ]]; then
-  log "Rendering app icon (Prismax)"
-  if swift "$ROOT_DIR/scripts/render_app_icon.swift" "$ICONSET_DIR" >/dev/null; then
-    ok "Icon rendered → AppIcon.appiconset"
+  log "Generating app icons from source 1024.png"
+  if [[ -f "$ROOT_DIR/icons/1024.png" ]]; then
+    if bash "$ROOT_DIR/scripts/generate_icons.sh" "$ROOT_DIR/icons/1024.png" "$ICONSET_DIR" >/dev/null; then
+      ok "Icons generated → AppIcon.appiconset"
+    else
+      die "Icon generation failed."
+    fi
   else
-    die "Icon rendering failed."
+    die "Source icon not found: icons/1024.png"
   fi
 fi
 
 # ── 2. Generate Xcode project ───────────────────────────────────────────────
 log "Generating Xcode project (XcodeGen)"
 ( cd "$ROOT_DIR" && xcodegen generate >/dev/null )
-ok "Prismax.xcodeproj generated"
+ok "PrismaX.xcodeproj generated"
 
 # ── 3. Build Release ────────────────────────────────────────────────────────
 # Ad-hoc sign (no Developer account needed). Hardened runtime stays off so the

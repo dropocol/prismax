@@ -1,4 +1,4 @@
-name: Prismax
+name: PrismaX
 options:
   bundleIdPrefix: com.prismax
   deploymentTarget:
@@ -13,29 +13,30 @@ settings:
     MARKETING_VERSION: "1.0"
     CURRENT_PROJECT_VERSION: "1"
     GENERATE_INFOPLIST_FILE: YES
-    INFOPLIST_KEY_NSHumanReadableCopyright: "Copyright (c) 2026 Prismax. All rights reserved."
+    INFOPLIST_KEY_NSHumanReadableCopyright: "Copyright (c) 2026 PrismaX. All rights reserved."
     INFOPLIST_KEY_LSApplicationCategoryType: "public.app-category.developer-tools"
 
 targets:
-  Prismax:
+  PrismaX:
     type: application
     platform: macOS
     sources:
-      - path: Prismax
+      - path: PrismaX
         excludes:
           - "**/.DS_Store"
     resources:
-      - path: Prismax/Resources/Assets.xcassets
+      - path: PrismaX/Resources/Assets.xcassets
+      - path: PrismaX/Resources/app_icon.png
       # `type: folder` creates a folder reference (blue folder) so the
       # `terminal/` directory structure is preserved in the app bundle —
       # the index.html references xterm.js / xterm.css by relative path.
-      - path: Prismax/Resources/terminal
+      - path: PrismaX/Resources/terminal
         type: folder
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.prismax.app
-        PRODUCT_NAME: Prismax
-        INFOPLIST_KEY_CFBundleDisplayName: Prismax
+        PRODUCT_NAME: PrismaX
+        INFOPLIST_KEY_CFBundleDisplayName: PrismaX
         # Enable Hardened Runtime features appropriate for a developer tool
         ENABLE_HARDENED_RUNTIME: NO
         CODE_SIGN_IDENTITY: "-"
@@ -43,4 +44,4 @@ targets:
         # Link libutil (forkpty) used by the embedded terminal.
         OTHER_LDFLAGS: "-lutil"
         # Allow the terminal PTY + arbitrary-process execution.
-        INFOPLIST_KEY_NSAppleEventsUsageDescription: "Prismax runs shell commands in your projects on your behalf."
+        INFOPLIST_KEY_NSAppleEventsUsageDescription: "PrismaX runs shell commands in your projects on your behalf."

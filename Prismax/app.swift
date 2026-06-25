@@ -2,7 +2,7 @@ import SwiftUI
 import SwiftData
 
 @main
-struct PrismaxApp: App {
+struct PrismaXApp: App {
     let modelContainer: ModelContainer
 
     @State private var appModel = AppModel()

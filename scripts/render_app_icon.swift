@@ -1,4 +1,4 @@
-// Renders the Prismax app icon to PNGs in the sizes the macOS asset catalog
+// Renders the PrismaX app icon to PNGs in the sizes the macOS asset catalog
 // expects. Run via the build script, or directly:
 //   swift scripts/render_app_icon.swift
 //
@@ -194,7 +194,7 @@ func renderPNG(size S: CGFloat, to url: URL) {
 let fm = FileManager.default
 let outputDir = URL(fileURLWithPath: CommandLine.arguments.count > 1
                     ? CommandLine.arguments[1]
-                    : "Prismax/Resources/Assets.xcassets/AppIcon.appiconset")
+                    : "PrismaX/Resources/Assets.xcassets/AppIcon.appiconset")
 
 // mac app icon sizes (points): 16,32,64,128,256,512,1024 (×2 scales).
 let sizes: [(name: String, px: CGFloat)] = [
@@ -210,7 +210,7 @@ let sizes: [(name: String, px: CGFloat)] = [
     ("icon_512@2x.png", 1024)
 ]
 
-print("Rendering Prismax app icon → \(outputDir.path)")
+print("Rendering PrismaX app icon → \(outputDir.path)")
 for (name, px) in sizes {
     renderPNG(size: px, to: outputDir.appendingPathComponent(name))
 }

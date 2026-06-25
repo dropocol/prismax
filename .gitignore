@@ -2,7 +2,7 @@
 build/
 DerivedData/
 *.xcodeproj/
-!Prismax.xcodeproj/project.xcworkspace
+!PrismaX.xcodeproj/project.xcworkspace
 *.xcworkspace
 xcuserdata/
 *.xcuserstate

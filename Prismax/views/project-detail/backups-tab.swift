@@ -146,7 +146,7 @@ struct BackupsTab: View {
                 .onChange(of: scheduleFrequency) { _, freq in
                     BackupScheduler.shared.schedule(project: project, environment: environment, frequency: freq)
                 }
-                Text("Backups run automatically while Prismax is open. A background LaunchAgent is planned for a future update.")
+                Text("Backups run automatically while PrismaX is open. A background LaunchAgent is planned for a future update.")
                     .font(.system(size: 10.5))
                     .foregroundStyle(.tertiary)
             }

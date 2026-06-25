@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Centralized design tokens for Prismax.
+/// Centralized design tokens for PrismaX.
 ///
 /// Inspired by the restrained, content-first aesthetic of Notion and Xcode:
 /// neutral surfaces, a single deliberate accent, hairline borders, and a tight

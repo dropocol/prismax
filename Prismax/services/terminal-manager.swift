@@ -237,7 +237,7 @@ final class TerminalManager {
         }
 
         guard process.isRunning else {
-            print("⚠️ Prismax: terminal is not running; command not sent: \(command)")
+            print("⚠️ PrismaX: terminal is not running; command not sent: \(command)")
             return
         }
 

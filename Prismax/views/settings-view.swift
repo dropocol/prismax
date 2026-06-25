@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 struct SettingsView: View {
     var body: some View {
@@ -59,6 +60,8 @@ private struct GeneralSettingsView: View {
 }
 
 private struct AboutSettingsView: View {
+    @State private var appIcon: NSImage?
+
     var body: some View {
         VStack(spacing: 14) {
             ZStack {
@@ -69,12 +72,20 @@ private struct AboutSettingsView: View {
                         RoundedRectangle(cornerRadius: 16, style: .continuous)
                             .strokeBorder(Theme.accent.opacity(0.18), lineWidth: 0.5)
                     )
-                Image(systemName: "hexagon.fill")
-                    .font(.system(size: 28, weight: .semibold))
-                    .foregroundStyle(Theme.accent)
+                if let icon = appIcon {
+                    Image(nsImage: icon)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: 48, height: 48)
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                } else {
+                    Image(systemName: "hexagon.fill")
+                        .font(.system(size: 28, weight: .semibold))
+                        .foregroundStyle(Theme.accent)
+                }
             }
             .softShadow(radius: 10, y: 5, opacity: 0.10)
-            Text("Prismax")
+            Text("PrismaX")
                 .font(.system(size: 19, weight: .semibold))
                 .foregroundStyle(.primary)
             Text("Version 1.0")
@@ -87,5 +98,17 @@ private struct AboutSettingsView: View {
                 .multilineTextAlignment(.center)
         }
         .padding(24)
+        .onAppear {
+            loadAppIcon()
+        }
+    }
+
+    private func loadAppIcon() {
+        if let path = Bundle.main.path(forResource: "app_icon", ofType: "png"),
+           let image = NSImage(contentsOfFile: path) {
+            self.appIcon = image
+        } else {
+            print("Failed to load app_icon.png from bundle")
+        }
     }
 }

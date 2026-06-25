@@ -105,7 +105,7 @@ struct SidebarView: View {
             }
         } message: {
             if let project = deletingProject {
-                Text("Remove \"\(project.name)\" from Prismax? This also removes its environments, commands, and run history. Your files on disk are not touched.")
+                Text("Remove \"\(project.name)\" from PrismaX? This also removes its environments, commands, and run history. Your files on disk are not touched.")
             }
         }
     }

@@ -1,10 +1,10 @@
-# Prismax
+# PrismaX
 
 A native macOS app for managing Prisma workflows across multiple projects and environments. Built with SwiftUI + SwiftData, with secrets stored in the macOS Keychain.
 
 ## Why
 
-The Prisma CLI has **no `--env-file` flag** (open request since 2020). Switching between local/staging/production means swapping `.env` files or wrapping every command in `dotenv-cli`. Prismax solves this natively: macOS's `Process` API accepts a full environment dictionary, so Prismax pulls the selected environment's secrets from the Keychain and injects them directly into the spawned prisma process. `DATABASE_URL` is correct every time — never written to disk in plaintext.
+The Prisma CLI has **no `--env-file` flag** (open request since 2020). Switching between local/staging/production means swapping `.env` files or wrapping every command in `dotenv-cli`. PrismaX solves this natively: macOS's `Process` API accepts a full environment dictionary, so PrismaX pulls the selected environment's secrets from the Keychain and injects them directly into the spawned prisma process. `DATABASE_URL` is correct every time — never written to disk in plaintext.
 
 ## Features
 
@@ -23,7 +23,7 @@ generates the Xcode project, builds a Release `.app`, and packages a `.dmg`
 into `./dist`:
 
 ```bash
-./build.sh                 # → dist/Prismax.app + dist/Prismax-1.0.dmg
+./build.sh                 # → dist/PrismaX.app + dist/PrismaX-1.0.dmg
 ./build.sh --no-dmg        # just the .app
 ./build.sh --clean         # rebuild from scratch
 ```
@@ -47,10 +47,10 @@ Requirements for building:
 xcodegen generate
 
 # Build from the command line
-xcodebuild -project Prismax.xcodeproj -scheme Prismax -configuration Release build
+xcodebuild -project PrismaX.xcodeproj -scheme PrismaX -configuration Release build
 
 # Or open in Xcode
-open Prismax.xcodeproj
+open PrismaX.xcodeproj
 ```
 
 The built app lands in `~/Library/Developer/Xcode/DerivedData/...`. Run it from
@@ -58,20 +58,21 @@ there, or copy it to `/Applications`.
 
 ### App icon
 
-The icon is generated programmatically (no binary assets checked in by hand).
-To re-render all sizes from `scripts/render_app_icon.swift`:
+Place a high-resolution icon (1024×1024 PNG) at `icons/1024.png`. The build script
+automatically generates all required sizes from this source. To regenerate icons:
 
 ```bash
-swift scripts/render_app_icon.swift
+./scripts/generate_icons.sh icons/1024.png
 ```
 
-This writes the PNGs into `Prismax/Resources/Assets.xcassets/AppIcon.appiconset`,
-which the build picks up via the asset catalog.
+This writes all sizes into `PrismaX/Resources/Assets.xcassets/AppIcon.appiconset`,
+which the build picks up via the asset catalog. The build script runs this
+automatically unless you use `--no-icon`.
 
 ## Architecture
 
 ```
-Prismax/
+PrismaX/
 ├── Models/         SwiftData @Model classes (Project, Environment, Command, …)
 ├── Services/       RunService, EnvironmentResolver, TerminalManager, KeychainService, …
 └── Views/          SwiftUI views (NavigationSplitView shell + tabs)
@@ -108,4 +109,4 @@ Secrets never touch disk in plaintext.
 
 ## License
 
-Copyright (c) 2026 Prismax. All rights reserved.
+Copyright (c) 2026 PrismaX. All rights reserved.

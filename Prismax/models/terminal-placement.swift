@@ -27,8 +27,8 @@ enum TerminalPlacement: String, Identifiable {
 
     var symbol: String {
         switch self {
-        case .bottom: "square.split.2x1"   // two stacked rows → terminal below
-        case .right: "square.split.1x2"    // two side-by-side columns → terminal right
+        case .bottom: "square.split.1x2"   // two stacked rows → terminal below
+        case .right: "square.split.2x1"    // two side-by-side columns → terminal right
         case .hidden: "rectangle"          // single panel, no terminal
         }
     }
