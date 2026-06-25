@@ -198,7 +198,7 @@ enum BackupService {
             return []
         }
         return entries
-            .filter { $0.pathExtension == "sql" || $0.pathExtension == "dump" }
+            .filter { Self.isBackupFile($0) }
             .compactMap { url in
                 let values = try? url.resourceValues(forKeys: [.creationDateKey, .fileSizeKey])
                 let provider = Provider.provider(for: url)
@@ -211,6 +211,17 @@ enum BackupService {
                 )
             }
             .sorted(by: { $0.createdAt > $1.createdAt })
+    }
+
+    /// Whether a directory entry is a recognized backup file. Accepts proper
+    /// extensions (`.dump`/`.sql`) and is tolerant of an early bug that wrote
+    /// extensions without a dot (`…stampdump`/`…stampsql`), so legacy backups
+    /// still appear in history and remain restorable.
+    private static func isBackupFile(_ url: URL) -> Bool {
+        let ext = url.pathExtension.lowercased()
+        if ext == "sql" || ext == "dump" { return true }
+        let name = url.lastPathComponent
+        return name.hasSuffix("dump") || name.hasSuffix("sql")
     }
 
     static func delete(fileURL: URL) throws {
@@ -496,13 +507,14 @@ struct BackupResult: Identifiable {
 }
 
 extension BackupService.Provider {
-    /// File extension for a fresh backup of this provider in the given format.
-    /// Postgres distinguishes compressed (`.dump`) from plain (`.sql`); the
-    /// others always emit SQL text.
+    /// File extension (with dot) for a fresh backup of this provider in the
+    /// given format. Postgres distinguishes compressed (`.dump`) from plain
+    /// (`.sql`); the others always emit SQL text. Includes the leading dot so it
+    /// can be concatenated into a filename directly.
     static func fileExtension(for provider: BackupService.Provider, format: BackupFormat) -> String {
         switch provider {
-        case .postgres: format == .compressed ? "dump" : "sql"
-        case .mysql, .sqlite: "sql"
+        case .postgres: format == .compressed ? ".dump" : ".sql"
+        case .mysql, .sqlite: ".sql"
         }
     }
 
@@ -511,6 +523,10 @@ extension BackupService.Provider {
     /// (`{env}-{provider}-{stamp}`); older ones without it are inferred:
     /// `.dump` → postgres, `.sql` → mysql (the more common of the two; sqlite
     /// dumps are rare and we can't tell from the extension alone).
+    ///
+    /// Tolerant of an early bug that wrote extensions without a dot
+    /// (`…stampdump`): those parse by the embedded provider token, and a name
+    /// ending in `dump`/`sql` still resolves correctly.
     static func provider(for url: URL) -> BackupService.Provider {
         let name = url.deletingPathExtension().lastPathComponent
         for part in name.split(separator: "-") {
@@ -518,7 +534,10 @@ extension BackupService.Provider {
                 return provider
             }
         }
-        return url.pathExtension == "dump" ? .postgres : .mysql
+        if url.pathExtension == "dump" { return .postgres }
+        // Legacy dotless names like "...2026-06-25_153910dump".
+        if name.hasSuffix("dump") { return .postgres }
+        return .mysql
     }
 }
 
@@ -526,8 +545,13 @@ extension BackupFormat {
     /// Infers the on-disk format of an existing backup file for a given
     /// provider, so restore can pick the right tool (`pg_restore` vs `psql`).
     /// Postgres `.dump` → compressed; everything else (`.sql`) → plainSQL.
+    ///
+    /// Tolerant of an early bug that wrote extensions without a dot
+    /// (`…stampdump`): such names still resolve to compressed for Postgres.
     static func format(for url: URL, provider: BackupService.Provider) -> BackupFormat {
         guard provider == .postgres else { return .plainSQL }
-        return url.pathExtension == "dump" ? .compressed : .plainSQL
+        if url.pathExtension == "dump" { return .compressed }
+        let dotless = url.deletingPathExtension().lastPathComponent
+        return dotless.hasSuffix("dump") ? .compressed : .plainSQL
     }
 }
