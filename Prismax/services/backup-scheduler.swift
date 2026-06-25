@@ -153,9 +153,10 @@ final class BackupScheduler {
     }
 
     private func runBackup(project: Project, environment: EnvProfile) {
-        guard let url = environment.variables
-            .first(where: { $0.key.uppercased() == "DATABASE_URL" })
-            .flatMap({ try? KeychainService.get(account: $0.keychainAccount) }) else {
+        // Resolve DATABASE_URL through the full env stack (Keychain + .env file),
+        // matching how the Backups tab resolves it, so a file-only URL is honored.
+        guard let url = EnvironmentResolver.resolve(project: project, environment: environment)["DATABASE_URL"],
+              !url.isEmpty else {
             return
         }
         Task {

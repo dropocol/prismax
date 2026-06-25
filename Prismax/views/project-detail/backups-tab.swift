@@ -19,38 +19,31 @@ struct BackupsTab: View {
     @State private var crossEnvTarget: BackupResult?
     @State private var crossEnvDestination: EnvProfile?
 
-    private var databaseURL: String? {
-        environment.variables
-            .first(where: { $0.key.uppercased() == "DATABASE_URL" })
-            .flatMap { try? KeychainService.get(account: $0.keychainAccount) }
-    }
+    /// Resolved DATABASE_URL for the current environment, sourced from the
+    /// connected `.env` file AND Keychain variables (via `EnvironmentResolver`),
+    /// not Keychain alone — so an env-file-only `DATABASE_URL` is recognized.
+    @State private var resolvedDatabaseURL: String?
 
-    /// Other environments in this project that have a DATABASE_URL, used as
-    /// destinations for cross-environment restore.
-    private var crossDestinations: [EnvProfile] {
-        project.environments
-            .filter { $0.id != environment.id && databaseURLString(for: $0) != nil }
-            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
-    }
+    /// Other environments with a resolvable DATABASE_URL — destinations for
+    /// cross-environment restore. Resolved alongside `resolvedDatabaseURL`.
+    @State private var crossDestinations: [EnvProfile] = []
 
-    private func databaseURLString(for env: EnvProfile) -> String? {
-        env.variables
-            .first(where: { $0.key.uppercased() == "DATABASE_URL" })
-            .flatMap { try? KeychainService.get(account: $0.keychainAccount) }
+    private var isPostgres: Bool {
+        guard let scheme = resolvedDatabaseURL.flatMap({ URL(string: $0)?.scheme }) else { return false }
+        return ["postgresql", "postgres"].contains(scheme.lowercased())
     }
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                actionsSection
-                schedulingSection
-                Divider()
-                listSection
+            VStack(alignment: .leading, spacing: 16) {
+                backupCard
+                scheduleCard
+                historyCard
             }
             .padding(16)
         }
         .onAppear { refresh() }
-    .onChange(of: environment.id) { refresh() }
+        .onChange(of: environment.id) { refresh() }
         .alert("Restore Backup?", isPresented: Binding(
             get: { restoreTarget != nil },
             set: { if !$0 { restoreTarget = nil } }
@@ -85,28 +78,37 @@ struct BackupsTab: View {
         }
     }
 
-    // MARK: Actions
+    // MARK: - Backup card
 
-    private var actionsSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 6) {
-                Image(systemName: "externaldrive")
-                    .font(.system(size: 11, weight: .semibold))
-                Text("BACKUP")
-                    .font(.micro)
-                    .tracking(0.5)
-            }
-            .foregroundStyle(.tertiary)
-
-            if let url = databaseURL {
-                HStack(spacing: 5) {
-                    Image(systemName: "cylinder")
-                        .font(.system(size: 10))
-                    Text(providerLabel(for: url))
-                        .font(.system(size: 11.5))
+    /// Primary action card: provider status, format/scope options, and the
+    /// backup button — or, when no DATABASE_URL resolves, guidance on where to
+    /// add one (variable OR connected .env file).
+    private var backupCard: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 8) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(Theme.accent.opacity(0.10))
+                        .frame(width: 30, height: 30)
+                    Image(systemName: "externaldrive.fill")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Theme.accent)
                 }
-                .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Backup & Restore")
+                        .font(.rowPrimary)
+                    Text("Snapshot this environment's database to a file.")
+                        .font(.rowSecondary)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                if let url = resolvedDatabaseURL {
+                    providerBadge(for: url)
+                }
+            }
 
+            if resolvedDatabaseURL != nil {
+                backupOptionsRow
                 Button {
                     performBackup()
                 } label: {
@@ -124,116 +126,111 @@ struct BackupsTab: View {
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
                 .disabled(isBackingUp)
-
-                backupOptionsSection
             } else {
-                VStack(alignment: .leading, spacing: 6) {
-                    Label("No DATABASE_URL", systemImage: "exclamationmark.triangle")
-                        .font(.rowPrimary)
-                        .foregroundStyle(Theme.warning)
-                    Text("Add a `DATABASE_URL` variable to **\(environment.name)** in the Environments tab.")
-                        .font(.rowSecondary)
-                        .foregroundStyle(.secondary)
-                }
-                .padding(14)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .cardStyle()
+                noURLState
             }
 
             if let statusMessage {
-                HStack(spacing: 5) {
-                    Image(systemName: statusError ? "xmark.octagon.fill" : "checkmark.circle.fill")
-                    Text(statusMessage)
-                        .font(.system(size: 11.5))
-                }
-                .foregroundStyle(statusError ? Theme.danger : Theme.success)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(
-                    Capsule().fill((statusError ? Theme.danger : Theme.success).opacity(0.10))
-                )
+                statusPill(message: statusMessage, error: statusError)
             }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .cardStyle()
+    }
+
+    private var backupOptionsRow: some View {
+        VStack(spacing: 10) {
+            HStack(spacing: 10) {
+                optionLabel("FORMAT")
+                Picker("", selection: $backupFormat) {
+                    ForEach(BackupFormat.allCases) { f in Text(f.label).tag(f) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .disabled(!isPostgres)
+                Spacer(minLength: 0)
+            }
+
+            Divider()
+
+            Toggle(isOn: $schemaOnly) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Public schema only")
+                        .font(.rowPrimary)
+                    Text("Skip `_prisma_migrations` for a portable data snapshot.")
+                        .font(.rowSecondary)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .disabled(!isPostgres)
         }
     }
 
-    // MARK: Scheduling
+    private var noURLState: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("No DATABASE_URL resolved", systemImage: "exclamationmark.triangle.fill")
+                .font(.rowPrimary)
+                .foregroundStyle(Theme.warning)
+            Text("Add `DATABASE_URL` as a variable to **\(environment.name)**, or connect a `.env` file that defines it, in the Environments tab.")
+                .font(.rowSecondary)
+                .foregroundStyle(.secondary)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Theme.warning.opacity(0.08))
+        )
+    }
 
-    private var schedulingSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Toggle(isOn: $scheduleEnabled) {
-                HStack(spacing: 6) {
-                    Image(systemName: "clock.badge.checkmark")
-                        .font(.system(size: 11, weight: .semibold))
-                    Text("Schedule while app is open")
-                        .font(.rowPrimary)
-                }
-            }
-            .onChange(of: scheduleEnabled) { _, on in
-                if on { BackupScheduler.shared.schedule(project: project, environment: environment, frequency: scheduleFrequency) }
-                else { BackupScheduler.shared.cancel(project: project, environment: environment) }
+    // MARK: - Schedule card
+
+    private var scheduleCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Image(systemName: "clock.badge.checkmark")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Text("Automatic schedule")
+                    .font(.rowPrimary)
+                Spacer()
+                Toggle("", isOn: $scheduleEnabled)
+                    .labelsHidden()
+                    .onChange(of: scheduleEnabled) { _, on in
+                        if on { BackupScheduler.shared.schedule(project: project, environment: environment, frequency: scheduleFrequency) }
+                        else { BackupScheduler.shared.cancel(project: project, environment: environment) }
+                    }
             }
 
             if scheduleEnabled {
+                Divider()
                 Picker("Frequency", selection: $scheduleFrequency) {
-                    ForEach(BackupFrequency.allCases) { freq in
-                        Text(freq.label).tag(freq)
-                    }
+                    ForEach(BackupFrequency.allCases) { freq in Text(freq.label).tag(freq) }
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
                 .onChange(of: scheduleFrequency) { _, freq in
                     BackupScheduler.shared.schedule(project: project, environment: environment, frequency: freq)
                 }
-                Text("Backups run automatically while PrismaX is open. A background LaunchAgent is planned for a future update.")
+                Text("Runs automatically while PrismaX is open. A background LaunchAgent is planned for a future update.")
                     .font(.system(size: 10.5))
                     .foregroundStyle(.tertiary)
             }
         }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .cardStyle()
     }
 
-    // MARK: Backup options
+    // MARK: - History card
 
-    /// Format + scope options for manual backups. Postgres gains a compressed
-    /// vs plain-SQL choice and a "public schema only" toggle (skips Prisma's
-    /// migration history) for portable data snapshots.
-    private var backupOptionsSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Picker("Format", selection: $backupFormat) {
-                ForEach(BackupFormat.allCases) { f in Text(f.label).tag(f) }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .disabled(!providerSupportsFormatChoice)
-
-            Toggle(isOn: $schemaOnly) {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("Public schema only")
-                        .font(.rowPrimary)
-                    Text("Skip `_prisma_migrations` — portable snapshot of table data (Postgres).")
-                        .font(.rowSecondary)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .disabled(!providerSupportsSchemaOnly)
-        }
-    }
-
-    /// Whether the current DB supports the compressed-vs-plain choice (Postgres).
-    private var providerSupportsFormatChoice: Bool {
-        guard let url = databaseURL, let scheme = URL(string: url)?.scheme else { return false }
-        return ["postgresql", "postgres"].contains(scheme.lowercased())
-    }
-
-    private var providerSupportsSchemaOnly: Bool { providerSupportsFormatChoice }
-
-    // MARK: List
-
-    private var listSection: some View {
+    private var historyCard: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 6) {
                 Image(systemName: "clock.arrow.circlepath")
                     .font(.system(size: 11, weight: .semibold))
-                Text("HISTORY")
+                Text("History")
                     .font(.micro)
                     .tracking(0.5)
                 Spacer()
@@ -270,12 +267,56 @@ struct BackupsTab: View {
         }
     }
 
-    // MARK: Logic
+    // MARK: - Helpers
+
+    private func optionLabel(_ text: String) -> some View {
+        Text(text)
+            .font(.micro)
+            .tracking(0.4)
+            .foregroundStyle(.tertiary)
+            .frame(width: 54, alignment: .leading)
+    }
+
+    private func providerBadge(for url: String) -> some View {
+        guard let parsed = URL(string: url), let scheme = parsed.scheme,
+              let provider = BackupService.Provider(urlScheme: scheme) else {
+            return AnyView(EmptyView())
+        }
+        return AnyView(
+            HStack(spacing: 4) {
+                Circle().fill(Theme.success).frame(width: 6, height: 6)
+                Text(provider.label)
+                    .font(.system(size: 11, weight: .medium))
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(Capsule().fill(Theme.success.opacity(0.10)))
+            .foregroundStyle(Theme.success)
+        )
+    }
+
+    private func statusPill(message: String, error: Bool) -> some View {
+        HStack(spacing: 5) {
+            Image(systemName: error ? "xmark.octagon.fill" : "checkmark.circle.fill")
+            Text(message).font(.system(size: 11.5))
+        }
+        .foregroundStyle(error ? Theme.danger : Theme.success)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(Capsule().fill((error ? Theme.danger : Theme.success).opacity(0.10)))
+    }
+
+    // MARK: - Logic
 
     private func refresh() {
         backups = BackupService.backups(projectID: project.id, envID: environment.id)
-        // Reflect the persisted schedule so the toggle stays accurate across
-        // app restarts and tab re-opens.
+        // Resolve DATABASE_URL via the full env stack (Keychain + .env file),
+        // and gather other environments that can serve as cross-restore targets.
+        resolvedDatabaseURL = resolvedURL(for: environment)
+        crossDestinations = project.environments
+            .filter { $0.id != environment.id && resolvedURL(for: $0) != nil }
+            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+
         if let freq = BackupScheduler.shared.frequency(forEnvironment: environment.id) {
             scheduleEnabled = true
             scheduleFrequency = freq
@@ -284,16 +325,17 @@ struct BackupsTab: View {
         }
     }
 
-    private func providerLabel(for url: String) -> String {
-        guard let parsed = URL(string: url), let scheme = parsed.scheme,
-              let provider = BackupService.Provider(urlScheme: scheme) else {
-            return "Unknown provider"
-        }
-        return "\(provider.label) detected"
+    /// Resolves a DATABASE_URL for `env` the same way commands do: Keychain
+    /// variables overlaid on the connected `.env` file. Returns nil if neither
+    /// defines one.
+    @MainActor
+    private func resolvedURL(for env: EnvProfile) -> String? {
+        EnvironmentResolver.resolve(project: project, environment: env)["DATABASE_URL"]
+            .flatMap { $0.isEmpty ? nil : $0 }
     }
 
     private func performBackup() {
-        guard let url = databaseURL else { return }
+        guard let url = resolvedDatabaseURL else { return }
         isBackingUp = true
         statusMessage = nil
         Task {
@@ -323,7 +365,7 @@ struct BackupsTab: View {
     }
 
     private func performRestore(_ backup: BackupResult) {
-        guard let url = databaseURL else { return }
+        guard let url = resolvedDatabaseURL else { return }
         isRestoring = true
         statusMessage = nil
         Task {
@@ -348,7 +390,7 @@ struct BackupsTab: View {
     /// (`crossEnvDestination`), leaving the source file in place.
     private func performCrossEnvRestore(_ backup: BackupResult) {
         guard let dest = crossEnvDestination,
-              let targetURL = databaseURLString(for: dest) else { return }
+              let targetURL = resolvedURL(for: dest) else { return }
         isRestoring = true
         statusMessage = nil
         Task {

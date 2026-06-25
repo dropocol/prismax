@@ -200,39 +200,27 @@ enum BackupService {
     private static func backupCommand(provider: Provider, url: URL, outputFile: URL, format: BackupFormat, schemaOnly: Bool) throws -> ShellCommand {
         // Postgres-only refinements applied when backing up just the public
         // schema (skip Prisma's migration history so the snapshot is portable).
-        let schemaArgs: [String] = schemaOnly ? ["--schema=public", "--exclude-table-data=_prisma_migrations"] : []
+        let schemaArgs: String = schemaOnly ? " --schema=public --exclude-table-data=_prisma_migrations" : ""
         switch provider {
         case .postgres:
+            // Connection string form (works with pg_dump 16+). Password stays in
+            // the URL (already resolved from env file/Keychain) rather than on
+            // the command line via PGPASSWORD — either is fine, this is simpler.
             switch format {
             case .compressed:
-                // Prefer connection string form (works with pg_dump 16+).
-                return ShellCommand(
-                    executable: "/bin/sh",
-                    arguments: ["-c", "pg_dump \"\(url.absoluteString)\" -F c \(schemaArgs.joined(separator: " ")) -f \"\(outputFile.path)\""]
-                )
+                return ShellCommand(commandLine: #"pg_dump "\#(url.absoluteString)" -F c\#(schemaArgs) -f "\#(outputFile.path)""#)
             case .plainSQL:
-                return ShellCommand(
-                    executable: "/bin/sh",
-                    arguments: ["-c", "pg_dump \"\(url.absoluteString)\" \(schemaArgs.joined(separator: " ")) -f \"\(outputFile.path)\""]
-                )
+                return ShellCommand(commandLine: #"pg_dump "\#(url.absoluteString)"\#(schemaArgs) -f "\#(outputFile.path)""#)
             }
         case .mysql:
             guard let host = url.host, let port = url.port else { throw BackupError.missingURL }
-            // Credentials are passed via MYSQL_PWD in the process environment
-            // (set in `extraEnvironment` by the caller), never on the command
-            // line — avoiding both shell injection and exposure in `ps`.
-            var cmd = ShellCommand(
-                executable: "/bin/sh",
-                arguments: ["-c", "mysqldump -h \(shellQuote(host)) -P \(port) -u \(shellQuote(url.user ?? "root")) \(shellQuote(url.lastPathComponent)) > \"\(outputFile.path)\""]
-            )
+            // Credentials are passed via MYSQL_PWD in the process environment,
+            // never on the command line.
+            var cmd = ShellCommand(commandLine: #"mysqldump -h \#(shellQuote(host)) -P \#(port) -u \#(shellQuote(url.user ?? "root")) \#(shellQuote(url.lastPathComponent)) > "\#(outputFile.path)""#)
             if let pwd = url.password { cmd.extraEnvironment["MYSQL_PWD"] = pwd }
             return cmd
         case .sqlite:
-            // url.path is the database file path for sqlite.
-            return ShellCommand(
-                executable: "/bin/sh",
-                arguments: ["-c", "sqlite3 \"\(url.path)\" .dump > \"\(outputFile.path)\""]
-            )
+            return ShellCommand(commandLine: #"sqlite3 "\#(url.path)" .dump > "\#(outputFile.path)""#)
         }
     }
 
@@ -241,48 +229,45 @@ enum BackupService {
         case .postgres:
             switch format {
             case .compressed:
-                return ShellCommand(
-                    executable: "/bin/sh",
-                    arguments: ["-c", "pg_restore --clean --if-exists -d \"\(url.absoluteString)\" \"\(inputFile.path)\""]
-                )
+                return ShellCommand(commandLine: #"pg_restore --clean --if-exists -d "\#(url.absoluteString)" "\#(inputFile.path)""#)
             case .plainSQL:
                 // psql continues past errors (ON_ERROR_STOP=0) so version-skew
                 // between dump source and target (e.g. a SET for a parameter
                 // the target doesn't know) doesn't abort the whole import.
-                return ShellCommand(
-                    executable: "/bin/sh",
-                    arguments: ["-c", "psql -v ON_ERROR_STOP=0 -d \"\(url.absoluteString)\" -f \"\(inputFile.path)\""]
-                )
+                return ShellCommand(commandLine: #"psql -v ON_ERROR_STOP=0 -d "\#(url.absoluteString)" -f "\#(inputFile.path)""#)
             }
         case .mysql:
             guard let host = url.host, let port = url.port else { throw BackupError.missingURL }
-            var cmd = ShellCommand(
-                executable: "/bin/sh",
-                arguments: ["-c", "mysql -h \(shellQuote(host)) -P \(port) -u \(shellQuote(url.user ?? "root")) \(shellQuote(url.lastPathComponent)) < \"\(inputFile.path)\""]
-            )
+            var cmd = ShellCommand(commandLine: #"mysql -h \#(shellQuote(host)) -P \#(port) -u \#(shellQuote(url.user ?? "root")) \#(shellQuote(url.lastPathComponent)) < "\#(inputFile.path)""#)
             if let pwd = url.password { cmd.extraEnvironment["MYSQL_PWD"] = pwd }
             return cmd
         case .sqlite:
-            return ShellCommand(
-                executable: "/bin/sh",
-                arguments: ["-c", "sqlite3 \"\(url.path)\" < \"\(inputFile.path)\""]
-            )
+            return ShellCommand(commandLine: #"sqlite3 "\#(url.path)" < "\#(inputFile.path)""#)
         }
     }
 
     // MARK: Shell
 
+    /// Executes the shell command via a **login** zsh so that tools installed
+    /// by the user (`pg_dump`, `psql`, `mysqldump` via Postgres.app, Homebrew,
+    /// DBngin, …) are found on PATH. A GUI app inherits only a minimal PATH
+    /// (`/usr/bin:/bin:…`), so a raw `/bin/sh` fails with "command not found".
+    ///
+    /// Login but non-interactive (`-l -c`): loads `.zprofile` PATH contributions
+    /// without sourcing interactive `.zshrc` banners. The resolved environment
+    /// from `EnvironmentResolver` is overlaid on top of the login shell's env so
+    /// the project's `DATABASE_URL` / `MYSQL_PWD` reach the tool.
     @discardableResult
     static func run(command: ShellCommand) async throws -> String {
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: command.executable)
-        process.arguments = command.arguments
-        // Overlay any extra env (e.g. MYSQL_PWD) onto the inherited environment.
-        if !command.extraEnvironment.isEmpty {
-            var env = ProcessInfo.processInfo.environment
-            for (k, v) in command.extraEnvironment { env[k] = v }
-            process.environment = env
-        }
+        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        process.arguments = ["-l", "-c", command.commandLine]
+
+        // Start from the login shell's environment, overlay the resolved
+        // project environment (DB URL, MYSQL_PWD, …).
+        var env = ProcessInfo.processInfo.environment
+        for (k, v) in command.extraEnvironment { env[k] = v }
+        process.environment = env
 
         let pipe = Pipe()
         process.standardOutput = pipe
@@ -309,11 +294,14 @@ enum BackupService {
 
 // MARK: - Supporting types
 
+/// A shell command line plus optional extra environment. Executed via a login
+/// zsh so user-installed DB tools resolve on PATH.
 struct ShellCommand {
-    let executable: String
-    let arguments: [String]
+    /// The full command string executed by `/bin/zsh -l -c`.
+    let commandLine: String
     /// Extra environment variables overlaid on the process's inherited env.
-    /// Used to pass `MYSQL_PWD` so credentials never appear on the command line.
+    /// Used to pass `MYSQL_PWD` (and the resolved `DATABASE_URL`) so
+    /// credentials never appear on the command line.
     var extraEnvironment: [String: String] = [:]
 }
 
