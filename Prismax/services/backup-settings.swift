@@ -65,9 +65,11 @@ enum BackupSettings {
     /// Resolves the directory a specific (project, environment) pair stores
     /// backups in. Applies the precedence above, then nests under it.
     ///
-    /// When using a configured location, nesting is `<root>/<project>/<env>/`
-    /// (human-readable). When using the built-in default, nesting is
-    /// `<root>/<projectID>/<envID>/` (matches pre-existing on-disk layout).
+    /// When using a configured location, nesting is `<root>/<env>/`
+    /// (human-readable; the project name is intentionally omitted since a chosen
+    /// folder is typically already project-scoped). When using the built-in
+    /// default, nesting is `<root>/<projectID>/<envID>/` (matches the
+    /// pre-existing on-disk layout and avoids collisions across projects).
     static func resolvedURL(project: Project, environment: EnvProfile) -> URL {
         let root = effectiveRoot(for: project)
         let usingBuiltIn = project.backupDirectoryOverride == nil && globalDefaultURL() == nil
@@ -77,7 +79,6 @@ enum BackupSettings {
                 .appendingPathComponent(environment.id.uuidString, isDirectory: true)
         }
         return root
-            .appendingPathComponent(safeFolderName(project.name), isDirectory: true)
             .appendingPathComponent(safeFolderName(environment.name), isDirectory: true)
     }
 
