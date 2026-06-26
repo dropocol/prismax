@@ -149,11 +149,11 @@ struct BackupsTab: View {
             // glyph sits OUTSIDE the toggle's tappable label.
             HStack(spacing: 6) {
                 Toggle(isOn: $schemaOnly) {
-                    Text("Public schema only")
+                    Text("Data-only backup")
                         .font(.rowPrimary)
                 }
                 .disabled(!isPostgres)
-                InfoHint(text: "Restricts the backup to the public schema and skips Prisma's _prisma_migrations rows. This produces a portable DATA snapshot — safe to restore across environments (e.g. prod → staging) without overwriting the target's migration state. Turn OFF for a full, exact clone of the database (same environment or disaster recovery). Postgres only.")
+                InfoHint(text: "Backs up only the public schema and skips Prisma's _prisma_migrations rows. This produces a portable DATA snapshot — safe to restore across environments (e.g. prod → staging) without overwriting the target's migration state. Turn OFF for a full, exact clone of the database (same environment or disaster recovery). Postgres only.")
                 Text("·  skips `_prisma_migrations`")
                     .font(.rowSecondary)
                     .foregroundStyle(.tertiary)
@@ -622,10 +622,14 @@ private struct InfoHint: View {
         }
         .buttonStyle(.plain)
         .popover(isPresented: $isPresented, arrowEdge: .top) {
+            // fixedSize(horizontal: false, vertical: false) lets the text claim
+            // its natural width up to 300pt instead of collapsing and truncating.
             Text(text)
                 .font(.system(size: 12))
                 .foregroundStyle(.primary)
-                .frame(maxWidth: 280, alignment: .leading)
+                .frame(maxWidth: 300, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: false)
+                .multilineTextAlignment(.leading)
                 .padding(12)
         }
     }
