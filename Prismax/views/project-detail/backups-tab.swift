@@ -145,18 +145,20 @@ struct BackupsTab: View {
 
             Divider().padding(.vertical, 10)
 
-            // Scope: a single-line toggle with inline description.
-            Toggle(isOn: $schemaOnly) {
-                HStack(spacing: 6) {
+            // Scope: toggle + inline note + info, kept as siblings so the info
+            // glyph sits OUTSIDE the toggle's tappable label.
+            HStack(spacing: 6) {
+                Toggle(isOn: $schemaOnly) {
                     Text("Public schema only")
                         .font(.rowPrimary)
-                    InfoHint(text: "Restricts the backup to the public schema and skips Prisma's _prisma_migrations rows. This produces a portable DATA snapshot — safe to restore across environments (e.g. prod → staging) without overwriting the target's migration state. Turn OFF for a full, exact clone of the database (same environment or disaster recovery). Postgres only.")
-                    Text("·  skips `_prisma_migrations`")
-                        .font(.rowSecondary)
-                        .foregroundStyle(.tertiary)
                 }
+                .disabled(!isPostgres)
+                InfoHint(text: "Restricts the backup to the public schema and skips Prisma's _prisma_migrations rows. This produces a portable DATA snapshot — safe to restore across environments (e.g. prod → staging) without overwriting the target's migration state. Turn OFF for a full, exact clone of the database (same environment or disaster recovery). Postgres only.")
+                Text("·  skips `_prisma_migrations`")
+                    .font(.rowSecondary)
+                    .foregroundStyle(.tertiary)
+                Spacer(minLength: 0)
             }
-            .disabled(!isPostgres)
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -599,16 +601,32 @@ private struct BackupRow: View {
     }
 }
 
-/// A small info glyph that surfaces a longer explanation via the native macOS
-/// hover tooltip. Keeps the layout compact while making option trade-offs
-/// discoverable — consistent with the app's existing `.help()` usage.
+/// An info glyph that, when clicked, shows an instant popover with a longer
+/// explanation. This avoids two problems with the native `.help()` tooltip:
+///   1. Its ~2s hover delay is too slow for discovery.
+///   2. When placed inside a Toggle's label, clicking the glyph toggles the
+///      checkbox (the hit goes to the Toggle, not the icon).
+/// The glyph consumes its own tap (Button), so it never toggles anything, and
+/// the popover appears immediately on click.
 private struct InfoHint: View {
     let text: String
+    @State private var isPresented = false
 
     var body: some View {
-        Image(systemName: "info.circle")
-            .font(.system(size: 11))
-            .foregroundStyle(.tertiary)
-            .help(text)
+        Button {
+            isPresented.toggle()
+        } label: {
+            Image(systemName: "info.circle")
+                .font(.system(size: 11))
+                .foregroundStyle(.tertiary)
+        }
+        .buttonStyle(.plain)
+        .popover(isPresented: $isPresented, arrowEdge: .top) {
+            Text(text)
+                .font(.system(size: 12))
+                .foregroundStyle(.primary)
+                .frame(maxWidth: 280, alignment: .leading)
+                .padding(12)
+        }
     }
 }
