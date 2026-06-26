@@ -129,10 +129,12 @@ enum BackupService {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 
         let stamp = Self.timestamp()
-        // Embed the provider + format in the filename so backups can be labeled
-        // accurately when listed later (the extension alone is ambiguous:
-        // mysql and sqlite both use .sql).
-        let fileURL = directory.appendingPathComponent("\(environmentName)-\(provider.rawValue)-\(stamp)\(BackupService.Provider.fileExtension(for: provider, format: format))")
+        // Embed the provider, scope, and format in the filename so backups can be
+        // labeled accurately when listed later (the extension alone is ambiguous:
+        // mysql and sqlite both use .sql). The scope tag (-data / -full) makes a
+        // portable data snapshot visually distinct from a full clone.
+        let scopeTag = schemaOnly ? "data" : "full"
+        let fileURL = directory.appendingPathComponent("\(environmentName)-\(provider.rawValue)-\(scopeTag)-\(stamp)\(BackupService.Provider.fileExtension(for: provider, format: format))")
 
         let command = try backupCommand(provider: provider, url: url, outputFile: fileURL, format: format, schemaOnly: schemaOnly)
         let output = try await ShellRunner.run(command: command, onToolMissing: raiseToolMissing)

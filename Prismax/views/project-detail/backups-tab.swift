@@ -376,6 +376,7 @@ struct BackupsTab: View {
                     ForEach(backups) { backup in
                         BackupRow(
                             backup: backup,
+                            currentEnvironmentName: environment.name,
                             onRestore: { restoreTarget = backup },
                             onReveal: { BackupService.reveal(fileURL: backup.fileURL) },
                             onDelete: { delete(backup) },
