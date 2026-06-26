@@ -56,7 +56,6 @@ enum BackupService {
     enum BackupError: Error, LocalizedError {
         case unsupportedProvider(String)
         case missingURL
-        case launchFailed(String)
         case restoreFailed(String)
         case toolMissing(provider: Provider, tool: String)
 
@@ -66,8 +65,6 @@ enum BackupService {
                 return "Unsupported database provider in URL scheme: \(s)"
             case .missingURL:
                 return "No DATABASE_URL is set for this environment."
-            case .launchFailed(let s):
-                return "Could not launch backup tool: \(s)"
             case .restoreFailed(let s):
                 return "Restore failed: \(s)"
             case .toolMissing(let provider, let tool):
@@ -138,7 +135,7 @@ enum BackupService {
         let fileURL = directory.appendingPathComponent("\(environmentName)-\(provider.rawValue)-\(stamp)\(BackupService.Provider.fileExtension(for: provider, format: format))")
 
         let command = try backupCommand(provider: provider, url: url, outputFile: fileURL, format: format, schemaOnly: schemaOnly)
-        let output = try await run(command: command)
+        let output = try await ShellRunner.run(command: command, onToolMissing: raiseToolMissing)
 
         let attrs = try? FileManager.default.attributesOfItem(atPath: fileURL.path)
         let size = (attrs?[.size] as? Int) ?? 0
@@ -168,7 +165,7 @@ enum BackupService {
         }
         let format = BackupFormat.format(for: fileURL, provider: provider)
         let command = try restoreCommand(provider: provider, url: url, inputFile: fileURL, format: format)
-        return try await run(command: command)
+        return try await ShellRunner.run(command: command, onToolMissing: raiseToolMissing)
     }
 
     /// Restores a backup into a *different* environment's database — e.g. copy
@@ -185,7 +182,7 @@ enum BackupService {
         }
         let format = BackupFormat.format(for: fileURL, provider: provider)
         let command = try restoreCommand(provider: provider, url: url, inputFile: fileURL, format: format)
-        return try await run(command: command)
+        return try await ShellRunner.run(command: command, onToolMissing: raiseToolMissing)
     }
 
     // MARK: Listing
@@ -304,142 +301,13 @@ enum BackupService {
         }
     }
 
-    // MARK: Shell
-
-    /// Directories where DB CLI tools (`pg_dump`, `psql`, `mysqldump`, `sqlite3`)
-    /// commonly live. A GUI app inherits a minimal PATH (`/usr/bin:/bin:…`) and a
-    /// login non-interactive zsh only sources `/etc/paths.d` + `.zprofile` —
-    /// neither of which includes Homebrew (`/opt/homebrew/bin`), Postgres.app, or
-    /// `libpq` on a typical setup, since those are added in interactive `.zshrc`.
-    /// We prepend any of these that exist so the tools resolve regardless.
-    private static let dbToolPathDirs: [String] = [
-        "/opt/homebrew/bin",                                   // Apple Silicon Homebrew
-        "/opt/homebrew/opt/libpq/bin",                         // Homebrew libpq (pg tools)
-        "/usr/local/bin",                                      // Intel Homebrew
-        "/usr/local/opt/libpq/bin",
-        "/Applications/Postgres.app/Contents/Versions/Latest/bin", // Postgres.app
-        "/Library/PostgreSQL/17/bin",                          // EnterpriseDB installers
-        "/Library/PostgreSQL/16/bin",
-        "/Library/PostgreSQL/15/bin",
-        "/Library/PostgreSQL/14/bin",
-    ]
-
-    /// Executes the shell command via the user's **default login shell** with DB
-    /// tool directories prepended to PATH, so `pg_dump`/`psql`/`mysqldump`/
-    /// `sqlite3` (installed via Homebrew, Postgres.app, libpq, …) are found even
-    /// though a GUI app inherits only a minimal PATH. The resolved project
-    /// environment is overlaid on top so the environment's `DATABASE_URL` /
-    /// `MYSQL_PWD` reach the tool.
-    ///
-    /// We use the user's configured login shell (from `getpwuid`/`$SHELL`),
-    /// not a hardcoded `/bin/zsh`, so PATH contributions from `.bash_profile`,
-    /// `.config/fish`, etc. are honored for non-zsh users. The shell runs
-    /// non-interactively (`-l -c` / `bash -lc`) so interactive banners/prompts
-    /// never leak into captured output.
-    ///
-    /// Before spawning we pre-flight the command's tool against PATH; if it's
-    /// missing we raise a clear, actionable `toolMissing` error (with install
-    /// hints) instead of a cryptic "Exit 127: command not found".
-    @discardableResult
-    static func run(command: ShellCommand) async throws -> String {
-        let env = Self.resolvedEnvironment(overlaying: command.extraEnvironment)
-
-        // Pre-flight: confirm the tool resolves on PATH so we can surface a
-        // helpful error rather than "exit 127". Checked against the same PATH
-        // the command will actually use.
-        if let tool = command.tool {
-            try ensureToolAvailable(tool, in: env)
-        }
-
-        let (shell, args) = Self.loginShell(for: command.commandLine)
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: shell)
-        process.arguments = args
-        process.environment = env
-
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
-
-        do { try process.run() } catch { throw BackupError.launchFailed(error.localizedDescription) }
-
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-
-        let output = String(data: data, encoding: .utf8) ?? ""
-        if process.terminationStatus != 0 {
-            throw BackupError.launchFailed("Exit \(process.terminationStatus): \(output)")
-        }
-        return output
+    private static func timestamp() -> String {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd_HHmmss"
+        return f.string(from: Date())
     }
 
-    // MARK: Shell resolution
-
-    /// The augmented environment: inherited env, overlaid with any extras
-    /// (resolved `DATABASE_URL`, `MYSQL_PWD`), with well-known DB tool
-    /// directories prepended to PATH.
-    private static func resolvedEnvironment(overlaying extras: [String: String]) -> [String: String] {
-        var env = ProcessInfo.processInfo.environment
-        for (k, v) in extras { env[k] = v }
-        env["PATH"] = augmentedPATH(base: env["PATH"] ?? "")
-        return env
-    }
-
-    /// Returns the user's default login shell and the arg vector to run
-    /// `commandLine` as a non-interactive login shell. Falls back to `/bin/sh`
-    /// if the configured shell can't be determined (always present on macOS).
-    ///
-    /// Using the user's own shell (bash/fish/zsh) means their profile's PATH
-    /// contributions (`.bash_profile`, `~/.config/fish/config.fish`, …) load,
-    /// not just zsh's `.zprofile`.
-    private static func loginShell(for commandLine: String) -> (shell: String, args: [String]) {
-        let shell = defaultShell()
-        // zsh/bash both honor `-l -c`; fish uses `-l -c`; sh/dash use `-c`.
-        switch (shell as NSString).lastPathComponent {
-        case "zsh", "bash":
-            return (shell, ["-l", "-c", commandLine])
-        case "fish":
-            return (shell, ["-l", "-c", commandLine])
-        default:
-            // /bin/sh fallback (always available): not a login shell, but PATH
-            // augmentation above already covers the common tool locations.
-            return ("/bin/sh", ["-c", commandLine])
-        }
-    }
-
-    /// The user's configured login shell, from the passwd database, falling back
-    /// to `$SHELL` and finally `/bin/sh`.
-    private static func defaultShell() -> String {
-        if let pw = getpwuid(getuid()), let s = pw.pointee.pw_shell,
-           let shell = String(cString: s, encoding: .utf8), !shell.isEmpty {
-            return shell
-        }
-        if let shell = ProcessInfo.processInfo.environment["SHELL"], !shell.isEmpty {
-            return shell
-        }
-        return "/bin/sh"
-    }
-
-    /// Raises `toolMissing` (with provider-specific install hints) if `tool`
-    /// does not resolve on PATH in `env`. The provider is inferred from the tool
-    /// name so the error message is accurate (pg_* → postgres, mysql* → mysql).
-    private static func ensureToolAvailable(_ tool: String, in env: [String: String]) throws {
-        let which = Process()
-        which.executableURL = URL(fileURLWithPath: "/usr/bin/which")
-        which.arguments = [tool]
-        which.environment = env
-        let pipe = Pipe()
-        which.standardOutput = pipe
-        which.standardError = pipe
-        do { try which.run() } catch { return } // if `which` itself fails, let the real command fail naturally
-        _ = pipe.fileHandleForReading.readDataToEndOfFile()
-        which.waitUntilExit()
-        guard which.terminationStatus == 0 else {
-            throw BackupError.toolMissing(provider: Self.provider(forTool: tool), tool: tool)
-        }
-    }
-
-    /// Infers the DB provider from a CLI tool name, for error messaging.
+    /// Infers the DB provider from a CLI tool name, for `toolMissing` errors.
     private static func provider(forTool tool: String) -> Provider {
         let t = tool.lowercased()
         if t.hasPrefix("pg") || t == "psql" { return .postgres }
@@ -448,54 +316,14 @@ enum BackupService {
         return .postgres // best-effort default
     }
 
-    /// Builds a PATH string with existing DB tool directories (those that exist
-    /// on disk) prepended to `base`, de-duplicated.
-    private static func augmentedPATH(base: String) -> String {
-        let fm = FileManager.default
-        var seen = Set<String>()
-        let prepend = dbToolPathDirs.filter { fm.isExecutableFile(atPath: $0) && seen.insert($0).inserted }
-        return (prepend + [base]).joined(separator: ":")
-    }
-
-    private static func timestamp() -> String {
-        let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd_HHmmss"
-        return f.string(from: Date())
+    /// Callback for `ShellRunner.run`: maps a missing tool name to the
+    /// domain-specific `BackupError.toolMissing` with install hints.
+    private static func raiseToolMissing(_ tool: String) throws {
+        throw BackupError.toolMissing(provider: provider(forTool: tool), tool: tool)
     }
 }
 
 // MARK: - Supporting types
-
-/// A shell command line plus optional extra environment. Executed via the
-/// user's login shell with DB tool dirs prepended to PATH.
-struct ShellCommand {
-    /// The full command string executed as `login-shell -l -c <commandLine>`.
-    let commandLine: String
-    /// The CLI tool name (first token of `commandLine`), used for a pre-flight
-    /// availability check so missing tools surface a clear error. Derived
-    /// automatically when built via `init(commandLine:)`.
-    var tool: String?
-    /// Extra environment variables overlaid on the process's inherited env.
-    /// Used to pass `MYSQL_PWD` (and the resolved `DATABASE_URL`) so
-    /// credentials never appear on the command line.
-    var extraEnvironment: [String: String] = [:]
-
-    init(commandLine: String, extraEnvironment: [String: String] = [:]) {
-        self.commandLine = commandLine
-        self.tool = ShellCommand.firstToken(of: commandLine)
-        self.extraEnvironment = extraEnvironment
-    }
-
-    /// Extracts the first whitespace-delimited token (the tool name).
-    private static func firstToken(of line: String) -> String? {
-        let trimmed = line.trimmingCharacters(in: .whitespaces)
-        guard let end = trimmed.firstIndex(where: { $0.isWhitespace }) else {
-            return trimmed.isEmpty ? nil : trimmed
-        }
-        let tok = String(trimmed[..<end])
-        return tok.isEmpty ? nil : tok
-    }
-}
 
 struct BackupResult: Identifiable {
     var id: URL { fileURL }
