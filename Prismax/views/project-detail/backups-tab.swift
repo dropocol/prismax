@@ -134,6 +134,7 @@ struct BackupsTab: View {
                 Text("Format")
                     .font(.rowPrimary)
                     .foregroundStyle(.secondary)
+                InfoHint(text: "Choose how the backup is written. Compressed (.dump) is compact and restores via pg_restore; Plain SQL (.sql) is human-readable and restores via psql — handy for inspecting or diffing the dump before restore. Postgres only.")
                 Picker("Format", selection: $backupFormat) {
                     ForEach(BackupFormat.allCases) { f in Text(f.label).tag(f) }
                 }
@@ -149,6 +150,7 @@ struct BackupsTab: View {
                 HStack(spacing: 6) {
                     Text("Public schema only")
                         .font(.rowPrimary)
+                    InfoHint(text: "Restricts the backup to the public schema and skips Prisma's _prisma_migrations rows. This produces a portable DATA snapshot — safe to restore across environments (e.g. prod → staging) without overwriting the target's migration state. Turn OFF for a full, exact clone of the database (same environment or disaster recovery). Postgres only.")
                     Text("·  skips `_prisma_migrations`")
                         .font(.rowSecondary)
                         .foregroundStyle(.tertiary)
@@ -594,5 +596,19 @@ private struct BackupRow: View {
         .padding(.vertical, 8)
         .padding(.horizontal, 12)
         .cardStyle(cornerRadius: 8)
+    }
+}
+
+/// A small info glyph that surfaces a longer explanation via the native macOS
+/// hover tooltip. Keeps the layout compact while making option trade-offs
+/// discoverable — consistent with the app's existing `.help()` usage.
+private struct InfoHint: View {
+    let text: String
+
+    var body: some View {
+        Image(systemName: "info.circle")
+            .font(.system(size: 11))
+            .foregroundStyle(.tertiary)
+            .help(text)
     }
 }
