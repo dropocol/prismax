@@ -119,18 +119,50 @@ ok "Version: $APP_VERSION"
 if [[ "$MAKE_DMG" == 1 ]]; then
   DMG_NAME="$PROJECT_NAME-$APP_VERSION.dmg"
   DMG_PATH="$DIST_DIR/$DMG_NAME"
+  VOLNAME="$PROJECT_NAME $APP_VERSION"
   log "Creating disk image: $DMG_NAME"
 
-  # hdiutil create -srcfolder is the simplest reliable path; it doesn't give a
-  # pretty "drag to Applications" layout, but it's dependency-free and robust.
-  rm -f "$DMG_PATH"
+  # The app icon to use as the DMG's volume icon. The build already embeds
+  # AppIcon.icns in the bundle, so reuse it instead of re-rendering.
+  APP_ICNS="$STAGED_APP/Contents/Resources/AppIcon.icns"
+
+  # hdiutil -srcfolder can't set a volume icon directly. The standard recipe:
+  # build a read/write image with a .VolumeIcon.icns at its root, set the
+  # volume's custom-icon flag with SetFile, then convert to compressed
+  # read-only. This gives the DMG the app's icon in Finder/Downloads without a
+  # "drag to Applications" background layout.
+  STAGE=$(mktemp -d -t prismax_dmg)
+  cp -R "$STAGED_APP" "$STAGE/"
+  [[ -f "$APP_ICNS" ]] && cp "$APP_ICNS" "$STAGE/.VolumeIcon.icns"
+
+  RW_DMG="$DIST_DIR/.${PROJECT_NAME}-rw.$$.dmg"
+  rm -f "$DMG_PATH" "$RW_DMG"
   hdiutil create \
-    -volname "$PROJECT_NAME $APP_VERSION" \
-    -srcfolder "$STAGED_APP" \
+    -ov \
+    -volname "$VOLNAME" \
+    -srcfolder "$STAGE" \
     -fs HFS+ \
-    -imagekey zlib-level=9 \
-    -format UDZO \
-    "$DMG_PATH" >/dev/null
+    -format UDRW \
+    "$RW_DMG" >/dev/null
+  rm -rf "$STAGE"
+
+  # Attach read/write at a known mount point (avoids parsing hdiutil output),
+  # set the custom-icon flag, then detach.
+  MOUNTPT="$DIST_DIR/.mnt_$$"
+  mkdir -p "$MOUNTPT"
+  if hdiutil attach -nobrowse -noverify -mountpoint "$MOUNTPT" "$RW_DMG" >/dev/null 2>&1; then
+    if [[ -f "$APP_ICNS" ]]; then
+      # SetFile ships with Xcode (which this script already requires). Guard
+      # anyway so a missing tool can't fail the whole build.
+      xcrun SetFile -a C "$MOUNTPT" 2>/dev/null || true
+    fi
+    hdiutil detach "$MOUNTPT" >/dev/null 2>&1 || true
+  fi
+  rmdir "$MOUNTPT" 2>/dev/null || true
+
+  # Convert to compressed, read-only distribution image.
+  hdiutil convert "$RW_DMG" -format UDZO -imagekey zlib-level=9 -o "$DMG_PATH" >/dev/null
+  rm -f "$RW_DMG"
   ok "$DMG_PATH"
 fi
 
