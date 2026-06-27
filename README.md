@@ -1,8 +1,21 @@
+<div align="left">
+
+<img src="banner.png" alt="PrismaX" width="600">
+
+[![macOS](https://img.shields.io/badge/macOS-15%2B-000000?logo=apple&logoColor=white)](https://www.apple.com/macos/)
+[![Swift](https://img.shields.io/badge/Swift-5-E9692E?logo=swift&logoColor=white)](https://swift.org)
+[![SwiftUI](https://img.shields.io/badge/SwiftUI-2396F3?logo=swift&logoColor=white)](https://developer.apple.com/xcode/swiftui/)
+[![License](https://img.shields.io/badge/License-All%20rights%20reserved-lightgrey)](#license)
+
 # PrismaX
+
+**Run Prisma commands across multiple projects and environments — never swap `.env` files again.**
 
 A native macOS app for managing Prisma workflows across multiple projects and
 environments. Built with SwiftUI + SwiftData, with secrets stored in the macOS
 Keychain.
+
+</div>
 
 ## Why
 
