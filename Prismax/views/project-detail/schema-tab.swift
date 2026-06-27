@@ -343,4 +343,3 @@ private struct EnumRow: View {
         .cardStyle()
     }
 }
-

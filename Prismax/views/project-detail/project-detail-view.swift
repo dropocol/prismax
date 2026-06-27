@@ -97,6 +97,7 @@ struct ProjectDetailView: View {
         case .bottom:
             VStack(spacing: 0) {
                 tabContent(for: env)
+                    .id(project.id)
                 ResizeDivider(orientation: .horizontal,
                               value: heightBinding,
                               range: 120...600)
@@ -107,6 +108,7 @@ struct ProjectDetailView: View {
         case .right:
             HStack(spacing: 0) {
                 tabContent(for: env)
+                    .id(project.id)
                     .frame(maxWidth: .infinity)
                 ResizeDivider(orientation: .vertical,
                               value: widthBinding,
@@ -117,6 +119,7 @@ struct ProjectDetailView: View {
         case .hidden:
             VStack(spacing: 0) {
                 tabContent(for: env)
+                    .id(project.id)
                 // Keep the terminal in the tree (collapsed) so its live shell
                 // and scrollback persist while hidden.
                 terminalPanel(for: env)

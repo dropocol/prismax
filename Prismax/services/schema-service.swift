@@ -3,6 +3,11 @@ import Foundation
 /// High-level introspection service: parses the schema file and runs
 /// `prisma migrate status` to report migration state.
 ///
+/// The prisma command runs through `ShellRunner` (the same path the integrated
+/// terminal and backup service use), so it inherits the user's full PATH
+/// (Homebrew, nvm, fnm, …) rather than the minimal PATH a GUI app gets —
+/// without that, `npx`/`node` resolve to "command not found".
+///
 /// Operates on a `Sendable` snapshot so it can cross async boundaries safely
 /// under Swift 6 concurrency (SwiftData @Model classes are not Sendable).
 enum SchemaService {
@@ -73,36 +78,64 @@ enum SchemaService {
             prismaDir: snapshot.prismaDir,
             schemaPath: snapshot.schemaPath
         )
-        let commandTokens = builder.commandString(for: "migrate status")
-            .split(separator: " ").map(String.init).map(shellQuote)
-            .joined(separator: " ")
+        let commandLine = builder.commandString(for: "migrate status")
 
-        // Run through a login shell so the user's full PATH (Homebrew, nvm,
-        // fnm, volta, etc.) is loaded; GUI apps inherit a minimal PATH.
-        // Export each Keychain env var so it takes precedence.
-        let exports = snapshot.envVars
-            .map { "export \(shellQuote($0.key))=\(shellQuote($0.value));" }
-            .joined(separator: " ")
-        let shellCommand = exports.isEmpty ? commandTokens : "\(exports) \(commandTokens)"
-
-        let result = await ProcessRunner.run(
-            shellCommand: shellCommand,
-            directory: snapshot.commandDirectory
+        // Run through `ShellRunner` (the same path the integrated terminal and
+        // backup service use): it runs the user's login shell with well-known
+        // tool directories — including Homebrew's `/opt/homebrew/bin`, where
+        // `node`/`npx` live on a `brew install node` setup — prepended to PATH.
+        // A GUI app only inherits a minimal PATH, so without this `npx` resolves
+        // to "command not found" even though it works fine in a real terminal.
+        // Env vars ride along via `extraEnvironment` so secrets (DATABASE_URL,
+        // MYSQL_PWD, …) reach the process without appearing on the command line.
+        let command = ShellCommand(
+            commandLine: commandLine,
+            extraEnvironment: snapshot.envVars
         )
+
+        // ShellRunner throws on non-zero exit (and surfaces a clear "tool
+        // missing" error via its pre-flight `which`). For the status card we
+        // want to show whatever output we got either way, so capture success
+        // vs. failure text here rather than letting an exception escape. The
+        // timeout keeps an unreachable database from hanging the UI forever —
+        // `prisma migrate status` will otherwise block on the TCP connection.
+        let output: String
+        let succeeded: Bool
+        do {
+            output = try await ShellRunner.run(
+                command: command,
+                directory: snapshot.commandDirectory,
+                timeout: 20
+            )
+            succeeded = true
+        } catch {
+            output = "\(error.localizedDescription)"
+            succeeded = false
+        }
 
         // The command runs through the user's login shell, which can occasionally
         // emit banner/echo noise from .zprofile or a version manager (e.g.
         // "🚀 ZK-Scripts loaded!"). Strip lines that are obviously shell startup
         // chatter so only real prisma output reaches the UI.
-        let cleaned = Self.stripShellNoise(from: result.combinedOutput)
-        let pending = countMatches(of: "not yet applied", in: cleaned)
-        let applied = countMatches(of: "Following migration", in: cleaned)
+        let cleaned = Self.stripShellNoise(from: output)
+
+        // Total migrations is read from disk (each subdir of prisma/migrations is
+        // one migration) because Prisma's text output doesn't reliably state it,
+        // and a naive string match can never report the count you actually have.
+        // Pending is parsed from the command's "not yet applied" listing. Applied
+        // is derived: total − pending.
+        let total = Self.countMigrationsOnDisk(
+            rootPath: snapshot.path,
+            schemaPath: snapshot.schemaPath
+        )
+        let pending = Self.parsePending(from: cleaned)
+        let applied = max(0, total - pending)
 
         return MigrateStatus(
-            succeeded: result.isSuccess,
+            succeeded: succeeded,
             output: cleaned,
-            pendingCount: pending,
-            appliedCount: applied,
+            pendingCount: succeeded ? pending : 0,
+            appliedCount: succeeded ? applied : 0,
             databaseURLMasked: maskURL(schema.datasourceURL)
         )
     }
@@ -145,14 +178,91 @@ enum SchemaService {
             || (0x2B00...0x2BFF).contains(v)
     }
 
-    private static func countMatches(of needle: String, in text: String) -> Int {
-        var count = 0
-        var searchRange = text.startIndex..<text.endIndex
-        while let range = text.range(of: needle, options: .caseInsensitive, range: searchRange) {
-            count += 1
-            searchRange = range.upperBound..<text.endIndex
+    /// Counts migration folders on disk. Each immediate subdirectory of the
+    /// `migrations/` folder (sibling of `schema.prisma`) is one migration, named
+    /// `<timestamp>_<name>`. This is the authoritative total — it reflects what's
+    /// checked into the repo regardless of what the command prints.
+    ///
+    /// Resolves the migrations dir from the schema location: for
+    /// `prisma/schema.prisma` it's `prisma/migrations`; for `db/schema.prisma`
+    /// it's `db/migrations`. Returns 0 if the folder doesn't exist.
+    private static func countMigrationsOnDisk(rootPath: String, schemaPath: String) -> Int {
+        // The migrations dir is the schema's own directory + "/migrations".
+        let schemaDir = (schemaPath as NSString).deletingLastPathComponent
+        let migrationsRel = schemaDir.isEmpty
+            ? "migrations"
+            : schemaDir + "/migrations"
+        let migrationsAbs = (rootPath as NSString).appendingPathComponent(migrationsRel)
+
+        guard let entries = try? FileManager.default.contentsOfDirectory(atPath: migrationsAbs) else {
+            return 0
         }
-        return count
+        let fm = FileManager.default
+        return entries.reduce(0) { count, name in
+            let full = (migrationsAbs as NSString).appendingPathComponent(name)
+            var isDir: ObjCBool = false
+            // Count directories only, skip dotfiles (e.g. the migration lockfile
+            // `migration_lock.toml` is a file, so it's naturally excluded).
+            guard fm.fileExists(atPath: full, isDirectory: &isDir), isDir.boolValue else {
+                return count
+            }
+            return name.hasPrefix(".") ? count : count + 1
+        }
+    }
+
+    /// Counts pending migrations from `prisma migrate status` output. Prisma
+    /// lists un-applied migrations each on its own line after a header like
+    /// "Following migration(s) have not yet been applied:". the pending count is
+    /// the number of timestamped migration entries under that header. If the
+    /// output says the schema is up to date, there are no pending.
+    private static func parsePending(from output: String) -> Int {
+        let lower = output.lowercased()
+        if lower.contains("database schema is up to date") { return 0 }
+
+        let lines = output.split(separator: "\n", omittingEmptySubsequences: true)
+        var pending = 0
+        var inPendingSection = false
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            let lowerLine = trimmed.lowercased()
+            if lowerLine.contains("not yet applied") {
+                inPendingSection = true
+                continue
+            }
+            // A pending migration line looks like an indented timestamped name,
+            // e.g. "20240424065014_init" or "└─ 20240424_init └─ migration.sql".
+            // Prisma also renders a tree, so match lines that lead with a tree
+            // char or whitespace and contain a timestamp-like token (8+ digits).
+            if inPendingSection {
+                if lowerLine.contains("following migration") { continue }
+                if Self.looksLikeMigrationLine(trimmed) {
+                    pending += 1
+                } else if !trimmed.isEmpty && !lowerLine.contains("migrations found") {
+                    // A non-empty, non-migration line ends the pending block.
+                    inPendingSection = false
+                }
+            }
+        }
+        return pending
+    }
+
+    /// True if a line looks like a listed migration entry: contains a migration
+    /// timestamp (8+ consecutive digits, matching Prisma's `<timestamp>_<name>`
+    /// convention) and isn't itself a header/summary line.
+    private static func looksLikeMigrationLine(_ line: String) -> Bool {
+        // Count the longest run of consecutive digits; a migration timestamp is
+        // 14 digits (YYYYMMDDHHMMSS), so 8+ is a safe match threshold.
+        var run = 0
+        var maxRun = 0
+        for ch in line {
+            if ch.isNumber {
+                run += 1
+                if run > maxRun { maxRun = run }
+            } else {
+                run = 0
+            }
+        }
+        return maxRun >= 8
     }
 
     private static func maskURL(_ url: String?) -> String? {

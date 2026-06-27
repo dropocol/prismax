@@ -67,15 +67,45 @@ enum ShellRunner {
         "/Library/PostgreSQL/14/bin",
     ]
 
+    /// Bootstrap lines prepended to every command so Node version managers
+    /// (nvm, fnm, volta) and Bun add their bin dirs to PATH. Each line is
+    /// guarded to no-op when the tool isn't installed, so this is safe to run
+    /// ahead of any command (DB CLIs included).
+    ///
+    /// Why both this AND `toolPathDirs`: Homebrew installs drop `node`/`npx`
+    /// directly into `/opt/homebrew/bin`, which `toolPathDirs` covers. But nvm
+    /// and fnm keep each Node version in `~/.nvm/versions/node/vX/bin` — a
+    /// directory that only exists once the manager is *sourced*, which is what
+    /// these lines do. Without sourcing, `npx` can resolve (via Homebrew) while
+    /// `node` does not, and `npx`'s `#!/usr/bin/env node` shebang then fails
+    /// with `env: node: No such file or directory` (exit 127).
+    private static let versionManagerBootstrap = """
+    [ -s "$HOME/.nvm/nvm.sh" ] && . "$HOME/.nvm/nvm.sh" 2>/dev/null
+    command -v fnm >/dev/null 2>&1 && eval "$(fnm env --shell zsh 2>/dev/null)"
+    [ -s "$HOME/.volta/bin" ] && export PATH="$HOME/.volta/bin:$PATH"
+    [ -s "$HOME/.bun/bin" ] && export PATH="$HOME/.bun/bin:$PATH"
+    """
+
     /// Executes `command`, returning its combined stdout+stderr.
     ///
-    /// - Parameter onToolMissing: invoked (synchronously) when the command's tool
-    ///   isn't on PATH; the closure should return/throw the caller-specific
-    ///   error to raise. This keeps `ShellRunner` decoupled from any particular
-    ///   domain's error types.
+    /// - Parameters:
+    ///   - directory: Working directory to run in. When nil, the process
+    ///     inherits the app's cwd — fine for tools that don't care (e.g. a DB
+    ///     CLI pointed at a URL). Pass a project's command dir when the tool
+    ///     resolves files relative to cwd (Prisma's schema lookup), e.g. a
+    ///     monorepo package directory.
+    ///   - timeout: Max seconds to wait before terminating the process. Guards
+    ///     against commands that hang indefinitely (e.g. `prisma migrate status`
+    ///     trying to reach an offline database). `nil` = wait forever.
+    ///   - onToolMissing: invoked (synchronously) when the command's tool
+    ///     isn't on PATH; the closure should return/throw the caller-specific
+    ///     error to raise. This keeps `ShellRunner` decoupled from any particular
+    ///     domain's error types.
     @discardableResult
     static func run(
         command: ShellCommand,
+        directory: String? = nil,
+        timeout: TimeInterval? = nil,
         onToolMissing: (String) throws -> Void = { _ in }
     ) async throws -> String {
         let env = resolvedEnvironment(overlaying: command.extraEnvironment)
@@ -91,6 +121,9 @@ enum ShellRunner {
         process.executableURL = URL(fileURLWithPath: shell)
         process.arguments = args
         process.environment = env
+        if let directory {
+            process.currentDirectoryURL = URL(fileURLWithPath: directory)
+        }
 
         let pipe = Pipe()
         process.standardOutput = pipe
@@ -100,9 +133,24 @@ enum ShellRunner {
             throw ShellRunnerError.launchFailed(error.localizedDescription)
         }
 
+        // Enforce the timeout by terminating the process if it outlives `timeout`.
+        // The read below then unblocks and the captured partial output is returned.
+        var timedOut = false
+        if let timeout {
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
+                if process.isRunning {
+                    timedOut = true
+                    process.terminate()
+                }
+            }
+        }
+
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
 
+        if timedOut {
+            throw ShellRunnerError.timedOut(seconds: timeout ?? 0)
+        }
         let output = String(data: data, encoding: .utf8) ?? ""
         if process.terminationStatus != 0 {
             throw ShellRunnerError.launchFailed("Exit \(process.terminationStatus): \(output)")
@@ -133,15 +181,20 @@ enum ShellRunner {
     /// Returns the user's default login shell and the arg vector to run
     /// `commandLine` as a non-interactive login shell. Falls back to `/bin/sh`
     /// (always present on macOS) if the configured shell can't be determined.
+    ///
+    /// The version-manager bootstrap is prepended to `commandLine` so nvm/fnm/
+    /// volta/bun contribute their bin dirs to PATH before the command runs —
+    /// `toolPathDirs` can't reach those (version-specific) directories.
     private static func loginShell(for commandLine: String) -> (shell: String, args: [String]) {
+        let full = versionManagerBootstrap + "\n" + commandLine
         let shell = defaultShell()
         switch (shell as NSString).lastPathComponent {
         case "zsh", "bash", "fish":
-            return (shell, ["-l", "-c", commandLine])
+            return (shell, ["-l", "-c", full])
         default:
             // /bin/sh fallback (always available): not a login shell, but PATH
             // augmentation above already covers the common tool locations.
-            return ("/bin/sh", ["-c", commandLine])
+            return ("/bin/sh", ["-c", full])
         }
     }
 
@@ -158,25 +211,33 @@ enum ShellRunner {
         return "/bin/sh"
     }
 
-    /// Pre-flights `tool` via `which`; calls `onMissing` (which should throw the
-    /// caller-specific error) if it isn't resolvable on PATH in `env`.
+    /// Pre-flights `tool` by asking the user's login shell (with the version-
+    /// manager bootstrap applied) whether it resolves. Running the check through
+    /// the same shell that will run the command means the pre-flight sees the
+    /// identical PATH — including nvm/fnm/volta version dirs that only exist
+    /// after sourcing, which a plain `which` against the process env would miss.
+    /// Calls `onMissing` (which should throw the caller-specific error) if the
+    /// tool isn't resolvable.
     private static func ensureToolAvailable(
         _ tool: String,
         in env: [String: String],
         onMissing: (String) throws -> Void
     ) throws {
-        let which = Process()
-        which.executableURL = URL(fileURLWithPath: "/usr/bin/which")
-        which.arguments = [tool]
-        which.environment = env
-        let pipe = Pipe()
-        which.standardOutput = pipe
-        which.standardError = pipe
-        // If `which` itself fails to launch, let the real command fail naturally.
-        do { try which.run() } catch { return }
-        _ = pipe.fileHandleForReading.readDataToEndOfFile()
-        which.waitUntilExit()
-        guard which.terminationStatus == 0 else {
+        let check = versionManagerBootstrap + "\ncommand -v " + shellQuote(tool) + " >/dev/null 2>&1"
+        let shell = defaultShell()
+        let shellName = (shell as NSString).lastPathComponent
+        let args: [String] = shellName == "zsh" || shellName == "bash" || shellName == "fish"
+            ? ["-l", "-c", check]
+            : ["-c", check]
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: shell)
+        process.arguments = args
+        process.environment = env
+        // If the shell itself fails to launch, let the real command fail naturally.
+        do { try process.run() } catch { return }
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
             try onMissing(tool)
             return
         }
@@ -186,10 +247,12 @@ enum ShellRunner {
 /// Errors raised by `ShellRunner`, decoupled from any domain-specific error type.
 enum ShellRunnerError: Error, LocalizedError {
     case launchFailed(String)
+    case timedOut(seconds: TimeInterval)
 
     var errorDescription: String? {
         switch self {
         case .launchFailed(let s): "Could not launch tool: \(s)"
+        case .timedOut(let s): "Timed out after \(Int(s))s — the command didn't finish. The database may be unreachable."
         }
     }
 }

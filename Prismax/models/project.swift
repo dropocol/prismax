@@ -95,10 +95,16 @@ enum PackageManager: String, Codable, CaseIterable, Identifiable {
 
     /// The shell tokens that run `prisma` through this package manager.
     /// `PrismaCommandBuilder` consumes these (executable + args).
+    ///
+    /// These mirror the package-manager tabs in the official Prisma docs:
+    /// `npx`/`bunx`/`pnpm dlx` fetch the CLI on demand, so a command works even
+    /// before `prisma` is installed (e.g. right after `prisma init`); `yarn prisma`
+    /// uses the project-local install. (prisma/docs issue #7913 tracks keeping
+    /// these per-manager and avoiding npm-centric `npx` wording.)
     var prismaInvocation: (executable: String, args: [String]) {
         switch self {
         case .npm: ("npx", ["prisma"])
-        case .pnpm: ("pnpm", ["exec", "prisma"])
+        case .pnpm: ("pnpm", ["dlx", "prisma"])
         case .yarn: ("yarn", ["prisma"])
         case .bun: ("bunx", ["prisma"])
         }
