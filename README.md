@@ -1,6 +1,6 @@
 <div align="left">
 
-<img src="banner.png" alt="PrismaX" width="600">
+<img src="banner.png" alt="PrismaX">
 
 [![macOS](https://img.shields.io/badge/macOS-15%2B-000000?logo=apple&logoColor=white)](https://www.apple.com/macos/)
 [![Swift](https://img.shields.io/badge/Swift-5-E9692E?logo=swift&logoColor=white)](https://swift.org)
