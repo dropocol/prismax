@@ -295,7 +295,7 @@ struct ProjectDetailView: View {
 
     private func execute(command: Command, environment env: EnvProfile) {
         // RunService dispatches the resolved invocation into the integrated
-        // terminal (npx prisma / pnpm exec prisma / etc., respecting the
+        // terminal (npx prisma / pnpm dlx prisma / etc., respecting the
         // package manager and --schema setting) and records a RunRecord so the
         // run shows up in History. The real shell resolves the executable via
         // the user's PATH; env vars for the active environment are exported.

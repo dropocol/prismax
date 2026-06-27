@@ -4,8 +4,16 @@ struct SchemaTab: View {
     let project: Project
     let environment: EnvProfile
 
-    @State private var introspection: SchemaService.Introspection?
-    @State private var isLoading = false
+    /// Parsed schema (models/enums/generators). Read from disk — local and
+    /// near-instant, so it renders immediately on tab open / project switch.
+    @State private var schema: SchemaParser.Schema?
+    /// Migration status, which shells out `prisma migrate status` and may hit
+    /// the network. Loaded independently so a slow/offline check never blocks
+    /// the schema above it.
+    @State private var migrateStatus: SchemaService.MigrateStatus?
+    /// True only while `prisma migrate status` runs. Scoped to that section so
+    /// its spinner stays local — the rest of the tab keeps showing.
+    @State private var isLoadingStatus = false
     @State private var loadError: String?
     @State private var expandedModels: Set<String> = []
 
@@ -13,17 +21,19 @@ struct SchemaTab: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 headerSection
-                if isLoading {
-                    ProgressView("Introspecting…")
-                        .frame(maxWidth: .infinity)
-                        .padding()
-                } else if let error = loadError {
+                if let error = loadError {
                     errorView(error)
-                } else if let data = introspection {
-                    schemaSummary(data)
-                    migrateStatusSection(data)
-                    modelsSection(data)
-                    enumsSection(data)
+                } else {
+                    if let schema {
+                        schemaSummary(schema)
+                        migrateStatusSection
+                        modelsSection(schema)
+                        enumsSection(schema)
+                    } else {
+                        ProgressView("Reading schema…")
+                            .frame(maxWidth: .infinity)
+                            .padding()
+                    }
                 }
             }
             .padding(16)
@@ -41,9 +51,10 @@ struct SchemaTab: View {
                 .font(.micro)
                 .tracking(0.5)
             Spacer()
-            Button("Refresh", systemImage: "arrow.clockwise") { refresh() }
+            Button("Refresh", systemImage: "arrow.clockwise") { refreshStatus() }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
+                .disabled(isLoadingStatus)
         }
         .foregroundStyle(.tertiary)
     }
@@ -51,8 +62,7 @@ struct SchemaTab: View {
     // MARK: Summary
 
     @ViewBuilder
-    private func schemaSummary(_ data: SchemaService.Introspection) -> some View {
-        let schema = data.schema
+    private func schemaSummary(_ schema: SchemaParser.Schema) -> some View {
         LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
             StatCard(title: "Models", value: "\(schema.models.count)", symbol: "tablecells")
             StatCard(title: "Enums", value: "\(schema.enums.count)", symbol: "list.bullet")
@@ -63,45 +73,57 @@ struct SchemaTab: View {
     // MARK: Migrate status
 
     @ViewBuilder
-    private func migrateStatusSection(_ data: SchemaService.Introspection) -> some View {
-        let status = data.migrateStatus
+    private var migrateStatusSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            sectionLabel("Migration Status", symbol: "arrow.triangle.swap")
-
-            HStack(spacing: 8) {
-                StatusPill(label: "Applied", value: status.appliedCount, color: Theme.success)
-                StatusPill(label: "Pending", value: status.pendingCount, color: Theme.warning)
-                Spacer()
+            HStack(spacing: 6) {
+                sectionLabel("Migration Status", symbol: "arrow.triangle.swap")
+                if isLoadingStatus {
+                    ProgressView().controlSize(.small)
+                }
             }
 
-            if let url = status.databaseURLMasked {
-                Label(url, systemImage: "link")
-                    .font(.system(size: 10.5, design: .monospaced))
+            if let status = migrateStatus {
+                HStack(spacing: 8) {
+                    StatusPill(label: "Applied", value: status.appliedCount, color: Theme.success)
+                    StatusPill(label: "Pending", value: status.pendingCount, color: Theme.warning)
+                    Spacer()
+                }
+
+                if let url = status.databaseURLMasked {
+                    Label(url, systemImage: "link")
+                        .font(.system(size: 10.5, design: .monospaced))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+
+                if !status.output.isEmpty {
+                    Text(status.output)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(12)
+                        .background(Theme.consoleBody, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .textSelection(.enabled)
+                }
+            } else if !isLoadingStatus {
+                Text("Migration status unavailable.")
+                    .font(.rowSecondary)
                     .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
             }
-
-            Text(status.output)
-                .font(.system(size: 11, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(12)
-                .background(Theme.consoleBody, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                .textSelection(.enabled)
         }
     }
 
     // MARK: Models
 
     @ViewBuilder
-    private func modelsSection(_ data: SchemaService.Introspection) -> some View {
-        if data.schema.models.isEmpty { EmptyView() }
+    private func modelsSection(_ schema: SchemaParser.Schema) -> some View {
+        if schema.models.isEmpty { EmptyView() }
         else {
             VStack(alignment: .leading, spacing: 8) {
                 sectionLabel("Models", symbol: "tablecells")
                 VStack(spacing: 6) {
-                    ForEach(data.schema.models) { model in
+                    ForEach(schema.models) { model in
                         ModelRow(model: model, isExpanded: expandedModels.contains(model.id)) {
                             toggle(model.id)
                         }
@@ -114,13 +136,13 @@ struct SchemaTab: View {
     // MARK: Enums
 
     @ViewBuilder
-    private func enumsSection(_ data: SchemaService.Introspection) -> some View {
-        if data.schema.enums.isEmpty { EmptyView() }
+    private func enumsSection(_ schema: SchemaParser.Schema) -> some View {
+        if schema.enums.isEmpty { EmptyView() }
         else {
             VStack(alignment: .leading, spacing: 8) {
                 sectionLabel("Enums", symbol: "list.bullet")
                 VStack(spacing: 6) {
-                    ForEach(data.schema.enums) { e in
+                    ForEach(schema.enums) { e in
                         EnumRow(modelEnum: e)
                     }
                 }
@@ -160,19 +182,44 @@ struct SchemaTab: View {
 
     // MARK: Logic
 
+    /// On first appear: read the schema from disk (instant) and kick off the
+    /// migration status check in the background. The two run independently so a
+    /// slow/offline status check never delays the schema rendering.
     private func loadIfNeeded() {
-        if introspection == nil { refresh() }
+        if schema == nil { loadSchema() }
+        if migrateStatus == nil { refreshStatus() }
     }
 
-    private func refresh() {
-        isLoading = true
-        loadError = nil
+    /// Reads & parses `schema.prisma` off the main actor (it touches the
+    /// filesystem) and shows it the moment it's ready.
+    private func loadSchema() {
+        let path = project.path
+        let schemaPath = project.schemaPath
+        Task {
+            let parsed = await Task.detached(priority: .userInitiated) {
+                SchemaService.readSchema(path: path, schemaPath: schemaPath)
+            }.value
+            await MainActor.run { schema = parsed }
+        }
+    }
+
+    /// Runs `prisma migrate status` and updates only the migration status block.
+    /// Its spinner is scoped to that section, so the schema above stays visible
+    /// while this runs. A timeout in `ShellRunner` ensures an unreachable DB
+    /// can't spin this forever.
+    private func refreshStatus() {
+        isLoadingStatus = true
         let snap = SchemaService.snapshot(project: project, environment: environment)
         Task {
-            let result = await SchemaService.introspect(snapshot: snap)
+            // `runMigrateStatus` re-reads the schema to mask the datasource URL;
+            // cheap relative to the network call it wraps.
+            let status = await SchemaService.runMigrateStatus(
+                snapshot: snap,
+                schema: SchemaService.readSchema(path: snap.path, schemaPath: snap.schemaPath)
+            )
             await MainActor.run {
-                introspection = result
-                isLoading = false
+                migrateStatus = status
+                isLoadingStatus = false
             }
         }
     }

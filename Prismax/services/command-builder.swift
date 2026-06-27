@@ -2,7 +2,7 @@ import Foundation
 
 /// Builds the prisma invocation for a project as a single source of truth.
 ///
-/// Resolves the package-manager executable (`npx prisma`, `pnpm exec prisma`,
+/// Resolves the package-manager executable (`npx prisma`, `pnpm dlx prisma`,
 /// …), appends the user's prisma args, and conditionally adds `--schema`
 /// (relativized to the command dir for monorepo support). Both the integrated
 /// terminal and `SchemaService` route through here so command construction can
@@ -32,7 +32,7 @@ struct PrismaCommandBuilder: Sendable {
     }
 
     /// The shell tokens that launch prisma for this project's package manager,
-    /// e.g. `["npx", "prisma"]` or `["pnpm", "exec", "prisma"]`.
+    /// e.g. `["npx", "prisma"]` or `["pnpm", "dlx", "prisma"]`.
     private var prismaTokens: [String] {
         let (executable, baseArgs) = packageManager.prismaInvocation
         return [executable] + baseArgs
