@@ -60,12 +60,32 @@ final class RunService {
         try? modelContext.save()
 
         guard let terminalManager else { return }
-        terminalManager.runCommand(
-            shellCommand,
-            in: project,
-            environment: env,
-            commandTitle: command.name
-        )
+
+        // For background commands, capture the exit code via the shell's OSC
+        // sentinel so the record reflects the real outcome (success/failed).
+        // Foreground commands (studio/format) don't return — left as .dispatched.
+        if isForeground {
+            terminalManager.runCommand(
+                shellCommand,
+                in: project,
+                environment: env,
+                commandTitle: command.name
+            )
+        } else {
+            terminalManager.runCommand(
+                shellCommand,
+                in: project,
+                environment: env,
+                commandTitle: command.name,
+                trackExit: true,
+                onExit: { [weak modelContext] code in
+                    record.exitCode = code
+                    record.finishedAt = .now
+                    record.status = code == 0 ? .success : .failed
+                    try? modelContext?.save()
+                }
+            )
+        }
     }
 
     // MARK: Rerun

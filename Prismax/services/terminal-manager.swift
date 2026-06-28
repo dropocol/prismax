@@ -231,11 +231,18 @@ final class TerminalManager {
     /// Runs a command in the project's terminal. Behavior depends on terminal
     /// mode: in `.persistent` it types into the shared terminal; in `.perCommand`
     /// it opens a fresh tab for this run and types into that.
+    ///
+    /// When `trackExit` is set, `onExit` is fired once with the command's exit
+    /// code (captured via the shell's `precmd` hook, armed at spawn) — or `-1`
+    /// if the shell exits first. Foreground commands (`studio`, `format`) skip
+    /// tracking — they don't return to the prompt.
     func runCommand(
         _ command: String,
         in project: Project,
         environment env: EnvProfile,
-        commandTitle: String? = nil
+        commandTitle: String? = nil,
+        trackExit: Bool = false,
+        onExit: (@MainActor (Int) -> Void)? = nil
     ) {
         let process: TerminalProcess
         let didSpawn: Bool
@@ -255,7 +262,17 @@ final class TerminalManager {
 
         guard process.isRunning else {
             print("⚠️ PrismaX: terminal is not running; command not sent: \(command)")
+            // Surface the failure so the caller doesn't leave a record hanging.
+            if trackExit { onExit?(-1) }
             return
+        }
+
+        // Install the exit tracker before typing so nothing is missed. The
+        // shell's `precmd` hook (armed at spawn) emits the OSC exit sentinel
+        // after the command, so the command itself is sent clean — no visible
+        // appendage in the terminal.
+        if trackExit, let onExit {
+            process.pendingExitHandler = onExit
         }
 
         if didSpawn {

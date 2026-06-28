@@ -43,6 +43,17 @@ final class TerminalProcess {
     /// cleared in tandem so the cleared state survives a rebind/restart.
     var onClear: (@MainActor () -> Void)?
 
+    /// One-shot callback fired when the command currently being tracked via an
+    /// exit sentinel finishes. `RunService` installs it just before typing a
+    /// tracked command and consumes the exit code to update the `RunRecord`.
+    /// Fires with `-1` if the shell exits before the sentinel is seen.
+    var pendingExitHandler: (@MainActor (Int) -> Void)?
+    /// Accumulates recent PTY output while a tracked run is in flight so we can
+    /// scan for the `PRISMAX_EXIT:<code>` sentinel emitted after the command.
+    private var scanAccumulator = Data()
+    private static let exitPrefix = "PRISMAX_EXIT:"
+    private static let exitBufferSize = 512  // ample room past the sentinel
+
     /// In-memory scrollback of all bytes emitted by this shell, kept so a
     /// freshly (re)bound xterm.js webview can be seeded with prior output.
     /// Capped to bound memory; older bytes are dropped once it grows past
@@ -73,6 +84,13 @@ final class TerminalProcess {
         // Ensure HOME is set (GUI apps have it, but be safe).
         if env["HOME"] == nil { env["HOME"] = NSHomeDirectory() }
         for (key, value) in environment { env[key] = value }
+        // Redirect zsh to our bootstrap ZDOTDIR so it sources our `.zshenv` at
+        // startup, which installs the exit-code reporter and then restores the
+        // user's real ZDOTDIR. We stash the original so the bootstrap can put
+        // it back before zsh loads the user's own startup files. See
+        // `ShellBootstrap` for why this is done via a file rather than typing.
+        env[ShellBootstrap.originalZDotDirEnvKey] = env["ZDOTDIR"] ?? ""
+        env["ZDOTDIR"] = ShellBootstrap.zdotdirPath
         // Convert to the char** format execve wants.
         let envPtrs: [UnsafeMutablePointer<CChar>?] = env.map { pair in
             strdup("\(pair.key)=\(pair.value)")
@@ -122,6 +140,7 @@ final class TerminalProcess {
         // A new shell means a fresh context — clear any scrollback from a prior
         // (dead) shell on this same object.
         history.removeAll(keepingCapacity: true)
+        scanAccumulator.removeAll(keepingCapacity: true)
 
         startReading()
         // Notify the view that a fresh shell is up so it can re-arm its output
@@ -152,6 +171,38 @@ final class TerminalProcess {
             let overflow = history.count - historyLimit
             history.removeFirst(overflow)
         }
+        // While a tracked run is pending, also watch the stream for the exit
+        // sentinel the command wrapper prints when the run finishes.
+        if pendingExitHandler != nil {
+            scanForExit(in: data)
+        }
+    }
+
+    /// Scans newly read bytes for the OSC 9 sentinel emitted by tracked-command
+    /// wrapping: `\e]9;PRISMAX_EXIT:<code>\x07`. OSC sequences are consumed by
+    /// xterm.js (not rendered), so this is invisible to the user. On match the
+    /// `pendingExitHandler` is fired once with the parsed code and cleared.
+    private func scanForExit(in data: Data) {
+        scanAccumulator.append(data)
+        if scanAccumulator.count > Self.exitBufferSize {
+            let overflow = scanAccumulator.count - Self.exitBufferSize
+            scanAccumulator.removeFirst(overflow)
+        }
+        guard let str = String(data: scanAccumulator, encoding: .utf8) ?? String(data: scanAccumulator.suffix(128), encoding: .ascii) else {
+            return
+        }
+        guard let range = str.range(of: "\(Self.exitPrefix)") else { return }
+        // Read digits after the marker until the BEL (\x07) that ends the OSC.
+        var idx = range.upperBound
+        var digits = ""
+        while idx < str.endIndex, str[idx].isNumber {
+            digits.append(str[idx]); idx = str.index(after: idx)
+        }
+        guard let code = Int(digits) else { return }
+        scanAccumulator.removeAll(keepingCapacity: true)
+        let handler = pendingExitHandler
+        pendingExitHandler = nil
+        handler?(code)
     }
 
     /// Replays accumulated scrollback as base64 chunks (each ≤ 8 KB), calling
@@ -250,6 +301,13 @@ final class TerminalProcess {
         readContinuation = nil
         if masterFD >= 0 { close(masterFD); masterFD = -1 }
         childPID = -1
+        // If a tracked run was pending, the shell died before its sentinel
+        // arrived — report it as a failure so the record doesn't freeze.
+        if let handler = pendingExitHandler {
+            pendingExitHandler = nil
+            scanAccumulator.removeAll(keepingCapacity: true)
+            handler(-1)
+        }
     }
 
     /// Cancels the current read loop and closes its fd, preparing the object
@@ -264,6 +322,13 @@ final class TerminalProcess {
         isRunning = false
         readContinuation?.finish()
         readContinuation = nil
+        // A tracked run can't complete after teardown — report failure so its
+        // record is updated instead of left at .running forever.
+        if let handler = pendingExitHandler {
+            pendingExitHandler = nil
+            scanAccumulator.removeAll(keepingCapacity: true)
+            handler(-1)
+        }
     }
 }
 
