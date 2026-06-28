@@ -9,6 +9,11 @@ final class AppModel {
     /// sidebar) can clear it without an extra binding.
     var sidebarSelection: SidebarItem?
 
+    /// A run the user wants History to focus on — set when they click a recent
+    /// run in the sidebar (or elsewhere). History reads it, selects + briefly
+    /// highlights that row, then clears it. nil means "no focus requested".
+    var focusedRunID: UUID?
+
     var showingAddProject: Bool = false
     var showingSettings: Bool = false
     var pendingImportURL: URL?

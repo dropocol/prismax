@@ -12,6 +12,11 @@ struct SidebarView: View {
     @State private var renameText = ""
     @State private var deletingProject: Project?
 
+    /// Most recent runs across all projects, newest first. Sliced to a short
+    /// window for the sidebar's quick-glance feed.
+    @Query(sort: \RunRecord.startedAt, order: .reverse) private var allRecords: [RunRecord]
+    private var recentRecords: [RunRecord] { Array(allRecords.prefix(6)) }
+
     private var selectionBinding: Binding<SidebarItem?> {
         Binding(
             get: { appModel.sidebarSelection },
@@ -45,11 +50,26 @@ struct SidebarView: View {
             }
 
             Section {
-                NavigationLink(value: SidebarItem.history) {
-                    HistoryRow()
+                if recentRecords.isEmpty {
+                    NavigationLink(value: SidebarItem.history) {
+                        HistoryRow()
+                    }
+                } else {
+                    ForEach(recentRecords) { record in
+                        Button {
+                            appModel.focusedRunID = record.id
+                            appModel.sidebarSelection = .history
+                        } label: {
+                            RecentActivityRow(record: record)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    NavigationLink(value: SidebarItem.history) {
+                        HistoryRow()
+                    }
                 }
             } header: {
-                sectionHeader("Activity")
+                sectionHeader(recentRecords.isEmpty ? "Activity" : "Recent Activity")
             }
         }
         .listStyle(.sidebar)
@@ -171,6 +191,42 @@ private struct HistoryRow: View {
             Text("History")
                 .font(.rowPrimary)
                 .foregroundStyle(.primary)
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 3)
+    }
+}
+
+/// A compact sidebar row for a recent run: status dot, command name, and the
+/// project it ran against. Clicking navigates to the full History view.
+private struct RecentActivityRow: View {
+    let record: RunRecord
+
+    private var dotColor: Color {
+        switch record.status {
+        case .running, .dispatched: Theme.running
+        case .success: Theme.success
+        case .failed: Theme.danger
+        case .canceled: Theme.warning
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 11) {
+            Circle()
+                .fill(dotColor)
+                .frame(width: 6, height: 6)
+                .frame(width: 20)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(record.commandName)
+                    .font(.rowPrimary)
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                Text(record.projectName)
+                    .font(.micro)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            }
             Spacer(minLength: 0)
         }
         .padding(.vertical, 3)
