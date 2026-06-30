@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# build.sh — build PrismaX into a distributable macOS .app (+ optional .dmg).
+# build.sh — build PrismaX into distributable macOS .apps (+ optional .dmgs),
+# one per architecture.
 #
 # This is for community/open-source distribution WITHOUT an Apple Developer
 # account: the app is ad-hoc signed (CODE_SIGN_IDENTITY="-") and NOT
@@ -8,14 +9,20 @@
 # must right-click → Open (or System Settings → Privacy & Security → Open
 # Anyway) the first time. That's expected for unsigned apps.
 #
+# Two builds are produced — one for Apple Silicon (arm64) and one for Intel
+# (x64) — each packaged into its own arch-specific DMG. Single-arch builds
+# are roughly half the size of a universal build, so downloads are leaner and
+# the right one is unambiguous.
+#
 # Requirements:
 #   - Xcode 16+ (or Command Line Tools)  → xcodebuild
 #   - XcodeGen                           → brew install xcodegen
 #   - A working `swift` (bundled with Xcode) for icon rendering
 #
 # Usage:
-#   ./build.sh              # build Release .app + DMG into ./dist
-#   ./build.sh --no-dmg     # skip DMG, just the .app
+#   ./build.sh              # build arm64 + x64 .apps + DMGs into ./dist
+#   ./build.sh --app        # build only the per-arch .apps (no DMGs)
+#   ./build.sh --dmg        # build only the per-arch DMGs (no .apps)
 #   ./build.sh --no-icon    # skip re-rendering the icon (use existing PNGs)
 #   ./build.sh --clean      # remove ./build and ./dist before building
 #
@@ -31,19 +38,30 @@ DIST_DIR="$ROOT_DIR/dist"
 ICONSET_DIR="$ROOT_DIR/PrismaX/Resources/Assets.xcassets/AppIcon.appiconset"
 
 # ── Flags ───────────────────────────────────────────────────────────────────
-MAKE_DMG=1
+# By default both artifacts are produced. Use the opt-in flags to build only
+# one kind: --app (just .apps), --dmg (just .dmg). Both together = same as
+# default. If neither is passed, both are built (sensible default).
+MAKE_APP=0
+MAKE_DMG=0
+EXPLICIT=0
 RENDER_ICON=1
 CLEAN=0
 for arg in "$@"; do
   case "$arg" in
-    --no-dmg)  MAKE_DMG=0 ;;
+    --app)     MAKE_APP=1; EXPLICIT=1 ;;
+    --dmg)     MAKE_DMG=1; EXPLICIT=1 ;;
     --no-icon) RENDER_ICON=0 ;;
     --clean)   CLEAN=1 ;;
     -h|--help)
-      sed -n '3,28p' "$0"; exit 0 ;;
+      sed -n '3,26p' "$0"; exit 0 ;;
     *) echo "Unknown option: $arg" >&2; exit 1 ;;
   esac
 done
+# If neither --app nor --dmg was given, build both (the default).
+if [[ "$EXPLICIT" == 0 ]]; then
+  MAKE_APP=1
+  MAKE_DMG=1
+fi
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
 log()  { printf "\033[1;34m▸ %s\033[0m\n" "$*"; }
@@ -84,87 +102,116 @@ log "Generating Xcode project (XcodeGen)"
 ( cd "$ROOT_DIR" && xcodegen generate >/dev/null )
 ok "PrismaX.xcodeproj generated"
 
-# ── 3. Build Release ────────────────────────────────────────────────────────
+# ── 3. Build + package per architecture ──────────────────────────────────────
+# We build once per arch (arm64 = Apple Silicon, x86_64 = Intel) and package
+# each into its own arch-specific DMG. Single-arch builds are ~half the size of
+# a universal build, so downloads are leaner and the right one is unambiguous.
 # Ad-hoc sign (no Developer account needed). Hardened runtime stays off so the
 # embedded PTY/forkpty and arbitrary child-process execution work unimpeded.
-log "Building $PROJECT_NAME ($CONFIGURATION, ad-hoc signed)"
-xcodebuild \
-  -project "$ROOT_DIR/$PROJECT_NAME.xcodeproj" \
-  -scheme "$SCHEME" \
-  -configuration "$CONFIGURATION" \
-  -destination 'platform=macOS' \
-  -derivedDataPath "$BUILD_DIR/DerivedData" \
-  CODE_SIGN_IDENTITY="-" \
-  CODE_SIGNING_REQUIRED=NO \
-  CODE_SIGNING_ALLOWED=YES \
-  build >/dev/null
-ok "Build succeeded"
+#
+# build_arch <arch> <slug>  — builds, stages, and (unless --no-dmg) DMGs.
+#   <arch>  : the value passed to xcodebuild -arch (arm64 / x86_64)
+#   <slug>  : the suffix used in the DMG name (arm64 / x64)
+build_arch() {
+  local arch="$1" slug="$2"
 
-BUILT_APP="$BUILD_DIR/DerivedData/Build/Products/$CONFIGURATION/$PROJECT_NAME.app"
-[[ -d "$BUILT_APP" ]] || die "Built .app not found at expected path: $BUILT_APP"
+  log "Building $PROJECT_NAME ($arch / $slug, $CONFIGURATION, ad-hoc signed)"
+  local arch_build_dir="$BUILD_DIR/DerivedData-$slug"
+  xcodebuild \
+    -project "$ROOT_DIR/$PROJECT_NAME.xcodeproj" \
+    -scheme "$SCHEME" \
+    -configuration "$CONFIGURATION" \
+    -arch "$arch" \
+    -derivedDataPath "$arch_build_dir" \
+    CODE_SIGN_IDENTITY="-" \
+    CODE_SIGNING_REQUIRED=NO \
+    CODE_SIGNING_ALLOWED=YES \
+    build >/dev/null
+  ok "Build succeeded ($arch)"
 
-# ── 4. Stage into ./dist ────────────────────────────────────────────────────
-log "Staging into ./dist"
-STAGED_APP="$DIST_DIR/$PROJECT_NAME.app"
-rm -rf "$STAGED_APP"
-cp -R "$BUILT_APP" "$STAGED_APP"
-# Re-stamp the ad-hoc signature on the staged copy.
-codesign --force --deep --sign - "$STAGED_APP" >/dev/null 2>&1 || true
-ok "$STAGED_APP"
+  local built_app="$arch_build_dir/Build/Products/$CONFIGURATION/$PROJECT_NAME.app"
+  [[ -d "$built_app" ]] || die "Built .app not found at expected path: $built_app"
 
-APP_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$STAGED_APP/Contents/Info.plist" 2>/dev/null || echo "0.0.0")"
+  # Stage into ./dist as <name>-<slug>.app. Always staged (the DMG step copies
+  # from it too); if --dmg-only was requested, it's removed again after the DMG
+  # is made so ./dist ends up containing only what was asked for.
+  log "Staging into ./dist ($slug)"
+  local staged_app="$DIST_DIR/$PROJECT_NAME-$slug.app"
+  rm -rf "$staged_app"
+  cp -R "$built_app" "$staged_app"
+  # Re-stamp the ad-hoc signature on the staged copy.
+  codesign --force --deep --sign - "$staged_app" >/dev/null 2>&1 || true
+  if [[ "$MAKE_APP" == 1 ]]; then
+    ok "$staged_app"
+  fi
+
+  if [[ "$MAKE_DMG" == 1 ]]; then
+    # Version is read once outside (before any arch builds); reuse it here.
+    local dmg_name="$PROJECT_NAME-$APP_VERSION-$slug.dmg"
+    local dmg_path="$DIST_DIR/$dmg_name"
+    local volname="$PROJECT_NAME $APP_VERSION ($slug)"
+    log "Creating disk image: $dmg_name"
+
+    # The app icon to use as the DMG's volume icon. The build already embeds
+    # AppIcon.icns in the bundle, so reuse it instead of re-rendering.
+    local app_icns="$staged_app/Contents/Resources/AppIcon.icns"
+
+    # hdiutil -srcfolder can't set a volume icon directly. The standard recipe:
+    # build a read/write image with a .VolumeIcon.icns at its root, set the
+    # volume's custom-icon flag with SetFile, then convert to compressed
+    # read-only. This gives the DMG the app's icon in Finder/Downloads without a
+    # "drag to Applications" background layout.
+    local stage; stage=$(mktemp -d -t prismax_dmg)
+    cp -R "$staged_app" "$stage/"
+    [[ -f "$app_icns" ]] && cp "$app_icns" "$stage/.VolumeIcon.icns"
+
+    local rw_dmg="$DIST_DIR/.${PROJECT_NAME}-${slug}-rw.$$.dmg"
+    rm -f "$dmg_path" "$rw_dmg"
+    hdiutil create \
+      -ov \
+      -volname "$volname" \
+      -srcfolder "$stage" \
+      -fs HFS+ \
+      -format UDRW \
+      "$rw_dmg" >/dev/null
+    rm -rf "$stage"
+
+    # Attach read/write at a known mount point (avoids parsing hdiutil output),
+    # set the custom-icon flag, then detach.
+    local mountpt="$DIST_DIR/.mnt_${slug}_$$"
+    mkdir -p "$mountpt"
+    if hdiutil attach -nobrowse -noverify -mountpoint "$mountpt" "$rw_dmg" >/dev/null 2>&1; then
+      if [[ -f "$app_icns" ]]; then
+        # SetFile ships with Xcode (which this script already requires). Guard
+        # anyway so a missing tool can't fail the whole build.
+        xcrun SetFile -a C "$mountpt" 2>/dev/null || true
+      fi
+      hdiutil detach "$mountpt" >/dev/null 2>&1 || true
+    fi
+    rmdir "$mountpt" 2>/dev/null || true
+
+    # Convert to compressed, read-only distribution image.
+    hdiutil convert "$rw_dmg" -format UDZO -imagekey zlib-level=9 -o "$dmg_path" >/dev/null
+    rm -f "$rw_dmg"
+    ok "$dmg_path"
+
+    # If only DMGs were requested, drop the staged .app so ./dist holds only
+    # what was asked for. (When --app is also set, keep it.)
+    if [[ "$MAKE_APP" == 0 ]]; then
+      rm -rf "$staged_app"
+    fi
+  fi
+}
+
+# Version is the same for both arch builds; read it once up front from the
+# XcodeGen source (project.yml) rather than from a built .app, so the log
+# ordering stays sensible before any arch build runs.
+APP_VERSION="$(grep -E 'MARKETING_VERSION:' "$ROOT_DIR/project.yml" | head -1 | sed -E 's/^[^"]*"([^"]+)".*$/\1/' )"
+[[ -n "$APP_VERSION" ]] || APP_VERSION="0.0.0"
 ok "Version: $APP_VERSION"
 
-# ── 5. DMG (optional) ───────────────────────────────────────────────────────
-if [[ "$MAKE_DMG" == 1 ]]; then
-  DMG_NAME="$PROJECT_NAME-$APP_VERSION.dmg"
-  DMG_PATH="$DIST_DIR/$DMG_NAME"
-  VOLNAME="$PROJECT_NAME $APP_VERSION"
-  log "Creating disk image: $DMG_NAME"
-
-  # The app icon to use as the DMG's volume icon. The build already embeds
-  # AppIcon.icns in the bundle, so reuse it instead of re-rendering.
-  APP_ICNS="$STAGED_APP/Contents/Resources/AppIcon.icns"
-
-  # hdiutil -srcfolder can't set a volume icon directly. The standard recipe:
-  # build a read/write image with a .VolumeIcon.icns at its root, set the
-  # volume's custom-icon flag with SetFile, then convert to compressed
-  # read-only. This gives the DMG the app's icon in Finder/Downloads without a
-  # "drag to Applications" background layout.
-  STAGE=$(mktemp -d -t prismax_dmg)
-  cp -R "$STAGED_APP" "$STAGE/"
-  [[ -f "$APP_ICNS" ]] && cp "$APP_ICNS" "$STAGE/.VolumeIcon.icns"
-
-  RW_DMG="$DIST_DIR/.${PROJECT_NAME}-rw.$$.dmg"
-  rm -f "$DMG_PATH" "$RW_DMG"
-  hdiutil create \
-    -ov \
-    -volname "$VOLNAME" \
-    -srcfolder "$STAGE" \
-    -fs HFS+ \
-    -format UDRW \
-    "$RW_DMG" >/dev/null
-  rm -rf "$STAGE"
-
-  # Attach read/write at a known mount point (avoids parsing hdiutil output),
-  # set the custom-icon flag, then detach.
-  MOUNTPT="$DIST_DIR/.mnt_$$"
-  mkdir -p "$MOUNTPT"
-  if hdiutil attach -nobrowse -noverify -mountpoint "$MOUNTPT" "$RW_DMG" >/dev/null 2>&1; then
-    if [[ -f "$APP_ICNS" ]]; then
-      # SetFile ships with Xcode (which this script already requires). Guard
-      # anyway so a missing tool can't fail the whole build.
-      xcrun SetFile -a C "$MOUNTPT" 2>/dev/null || true
-    fi
-    hdiutil detach "$MOUNTPT" >/dev/null 2>&1 || true
-  fi
-  rmdir "$MOUNTPT" 2>/dev/null || true
-
-  # Convert to compressed, read-only distribution image.
-  hdiutil convert "$RW_DMG" -format UDZO -imagekey zlib-level=9 -o "$DMG_PATH" >/dev/null
-  rm -f "$RW_DMG"
-  ok "$DMG_PATH"
-fi
+build_arch "arm64"  "arm64"   # Apple Silicon
+build_arch "x86_64" "x64"     # Intel
 
 # ── Done ────────────────────────────────────────────────────────────────────
 echo ""
