@@ -32,7 +32,10 @@ enum CommandSeeder {
 
         do {
             let projects = try context.fetch(FetchDescriptor<Project>())
-            for project in projects {
+            // Skip backups-only projects: they intentionally have no commands,
+            // and seeding the default set into them would pollute the workspace
+            // and re-show the Commands tab we hid for them.
+            for project in projects where !project.isBackupsOnly {
                 topUp(project: project)
             }
             try context.save()

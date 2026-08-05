@@ -155,7 +155,7 @@ private struct ProjectRow: View {
 
     var body: some View {
         HStack(spacing: 11) {
-            Image(systemName: "square.dashed")
+            Image(systemName: project.isBackupsOnly ? "internaldrive" : "square.dashed")
                 .font(.system(size: 13, weight: .regular))
                 .foregroundStyle(.secondary)
                 .frame(width: 20)
@@ -169,10 +169,19 @@ private struct ProjectRow: View {
                     if !project.environments.isEmpty {
                         Text("·").foregroundStyle(.tertiary).font(.micro)
                     }
-                    Text(project.packageManager.label.uppercased())
-                        .font(.micro)
-                        .tracking(0.3)
-                        .foregroundStyle(.tertiary)
+                    // Backups-only projects show a BACKUPS tag instead of the
+                    // (meaningless) package manager label.
+                    if project.isBackupsOnly {
+                        Text("BACKUPS")
+                            .font(.micro)
+                            .tracking(0.3)
+                            .foregroundStyle(Theme.accent)
+                    } else {
+                        Text(project.packageManager.label.uppercased())
+                            .font(.micro)
+                            .tracking(0.3)
+                            .foregroundStyle(.tertiary)
+                    }
                 }
             }
             Spacer(minLength: 0)

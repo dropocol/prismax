@@ -46,6 +46,15 @@ struct ProjectDetailView: View {
         project.environments.sorted(by: { $0.orderIndex < $1.orderIndex })
     }
 
+    /// Tabs shown for this project. Backups-only projects hide Commands and
+    /// Schema (they have no Prisma tooling); Backups comes first since it's
+    /// the main attraction, followed by Environments where DATABASE_URL lives.
+    /// Full Prisma projects show all four in their normal order.
+    private var visibleTabs: [ProjectTab] {
+        if project.isBackupsOnly { return [.backups, .environments] }
+        return ProjectTab.allCases
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -151,7 +160,7 @@ struct ProjectDetailView: View {
                             RoundedRectangle(cornerRadius: 11, style: .continuous)
                                 .strokeBorder(Theme.accent.opacity(0.18), lineWidth: 0.5)
                         )
-                    Image(systemName: "shippingbox")
+                    Image(systemName: project.isBackupsOnly ? "internaldrive" : "shippingbox")
                         .font(.system(size: 17, weight: .semibold))
                         .foregroundStyle(Theme.accent)
                 }
@@ -200,9 +209,10 @@ struct ProjectDetailView: View {
             // doubles as the header/content divider, so a selected tab's
             // underline sits directly on that divider with no gap.
             HStack(spacing: 12) {
-                TabBar(selection: $selectedTab)
+                TabBar(selection: $selectedTab, tabs: visibleTabs)
                 Spacer(minLength: 0)
                 placementPicker
+                modeMenu
             }
         }
         .padding(.horizontal, 18)
@@ -260,6 +270,67 @@ struct ProjectDetailView: View {
         )
     }
 
+    /// Per-project mode switcher (Prisma ⇄ Backups Only). Lets a user convert
+    /// a project after creation without re-adding it. Conversion is reversible;
+    /// switching to Prisma seeds default commands if the list is empty so the
+    /// Commands tab isn't blank.
+    private var modeMenu: some View {
+        Menu {
+            Button {
+                switchMode(to: false)
+            } label: {
+                HStack {
+                    Image(systemName: "shippingbox")
+                    Text("Prisma Project")
+                }
+            }
+            Button {
+                switchMode(to: true)
+            } label: {
+                HStack {
+                    Image(systemName: "internaldrive")
+                    Text("Backups Only")
+                }
+            }
+        } label: {
+            Image(systemName: project.isBackupsOnly ? "internaldrive" : "shippingbox")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 24, height: 22)
+                .background(
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(Color.primary.opacity(0.03))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 5)
+                        .strokeBorder(Theme.hairline, lineWidth: 0.5)
+                )
+                .contentShape(Rectangle())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .help(project.isBackupsOnly ? "Backups Only — click to switch mode" : "Prisma Project — click to switch mode")
+    }
+
+    /// Switches the project's mode, with side-effects:
+    /// - To backups-only: hide Commands/Schema (tabs re-filter on next render).
+    ///   Existing commands are preserved (not deleted) so switching back is
+    ///   lossless.
+    /// - To Prisma: if the project has no commands (the backups-only case),
+    ///   seed the default set so the Commands tab isn't blank.
+    private func switchMode(to backupsOnly: Bool) {
+        guard project.isBackupsOnly != backupsOnly else { return }
+        project.isBackupsOnly = backupsOnly
+        if !backupsOnly && project.commands.isEmpty {
+            project.commands = DefaultCommands.makeCommands()
+        }
+        try? modelContext.save()
+        // Snap the tab into the (possibly changed) visible set.
+        if !visibleTabs.contains(selectedTab) {
+            selectedTab = backupsOnly ? .backups : .commands
+        }
+    }
+
     /// The environment to run commands against. Falls back to the first one if
     /// the stored selection doesn't resolve — this handles the freshly-added
     /// project case where the SwiftData relationship may not have resolved in
@@ -276,6 +347,12 @@ struct ProjectDetailView: View {
         // first environment so the workspace renders immediately.
         if !sortedEnvironments.contains(where: { $0.id == selectedEnvironmentID }) {
             selectedEnvironmentID = sortedEnvironments.first?.id
+        }
+        // Snap the tab into the visible set. Handles mode switches (e.g. a
+        // project converted to backups-only while Commands was selected) and
+        // backups-only projects opened with the default .commands selection.
+        if !visibleTabs.contains(selectedTab) {
+            selectedTab = project.isBackupsOnly ? .backups : .commands
         }
     }
 

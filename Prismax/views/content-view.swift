@@ -21,9 +21,9 @@ struct ContentView: View {
             contentColumn
         }
         .sheet(isPresented: $appModel.showingAddProject) {
-            AddProjectSheet(prefilledURL: appModel.pendingImportURL) { url, detection in
+            AddProjectSheet(prefilledURL: appModel.pendingImportURL) { url, detection, isBackupsOnly in
                 appModel.pendingImportURL = nil
-                addProject(from: url, detection: detection)
+                addProject(from: url, detection: detection, isBackupsOnly: isBackupsOnly)
             }
         }
         .onChange(of: projects.count) {
@@ -81,7 +81,7 @@ struct ContentView: View {
         .background(Color.primary.opacity(0.015))
     }
 
-    private func addProject(from url: URL, detection: PackageManagerDetector.Detection) {
+    private func addProject(from url: URL, detection: PackageManagerDetector.Detection, isBackupsOnly: Bool) {
         let path = url.path
         let name = url.lastPathComponent
 
@@ -92,7 +92,14 @@ struct ContentView: View {
             prismaDir: detection.prismaDir,
             schemaPath: detection.schemaPath
         )
-        project.commands = DefaultCommands.makeCommands()
+        project.isBackupsOnly = isBackupsOnly
+        // Seed default commands only for full Prisma projects. Backups-only
+        // projects intentionally have no commands (the Commands tab is hidden).
+        // Their commands list stays empty; if the user later switches the
+        // project back to Prisma via the header menu, defaults are seeded then.
+        if !isBackupsOnly {
+            project.commands = DefaultCommands.makeCommands()
+        }
 
         let dev = EnvProfile(name: "Development", colorHex: "#34C759", orderIndex: 0)
         dev.project = project

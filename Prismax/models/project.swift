@@ -23,6 +23,13 @@ final class Project {
     /// is also unset, the built-in default (Application Support) is used. Mirrors
     /// `prismaDir`'s nil-means-default convention.
     var backupDirectoryOverride: String?
+    /// True for projects added only for database backups — no Prisma commands
+    /// or schema tooling. When true, the Commands/Schema tabs are hidden, the
+    /// app-launch command seeder skips this project, and the sidebar shows a
+    /// backups-specific icon/label. Switchable at any time via the header menu.
+    /// Defaults to false so existing stores migrate cleanly with no behavior
+    /// change for current projects.
+    var isBackupsOnly: Bool = false
     var createdAt: Date
     var orderIndex: Int
 

@@ -4,11 +4,14 @@ import SwiftUI
 /// when selected. More restrained than a filled-pill control.
 struct TabBar: View {
     @Binding var selection: ProjectTab
+    /// Tabs to render. Defaults to all cases; callers pass a filtered list for
+    /// projects that hide some tabs (e.g. backups-only hides Commands/Schema).
+    var tabs: [ProjectTab] = ProjectTab.allCases
     @Namespace private var ns
 
     var body: some View {
         HStack(spacing: 0) {
-            ForEach(ProjectTab.allCases) { tab in
+            ForEach(tabs) { tab in
                 tabButton(tab)
             }
         }
