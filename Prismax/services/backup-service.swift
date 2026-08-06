@@ -187,6 +187,47 @@ enum BackupService {
         return try await ShellRunner.run(command: command, onToolMissing: raiseToolMissing)
     }
 
+    // MARK: Streaming restore (live progress)
+
+    /// Streaming variant of `restore`: returns an `AsyncThrowingStream` of the
+    /// restore tool's combined stdout+stderr as it's emitted, so the caller can
+    /// render a live progress log. The stream finishes on success or throws a
+    /// `ShellRunnerError` (with full accumulated output) on failure. Used by
+    /// the restore progress panel.
+    static func restoreStreaming(databaseURL: String, from fileURL: URL, mode: RestoreMode = .clean, parallel: Bool = true) async throws -> AsyncThrowingStream<Data, Error> {
+        let (provider, url) = try parseRestoreTarget(databaseURL)
+        try requireExisting(fileURL: fileURL)
+        let format = BackupFormat.format(for: fileURL, provider: provider)
+        // verbose=true so pg_restore emits per-relation progress lines.
+        let command = try restoreCommand(provider: provider, url: url, inputFile: fileURL, format: format, verbose: true, mode: mode, parallel: parallel)
+        return try await ShellRunner.runStreaming(command: command, onToolMissing: raiseToolMissing)
+    }
+
+    /// Streaming variant of cross-environment restore. Same semantics as
+    /// `restoreStreaming` but pointed at a different environment's database.
+    static func restoreCrossEnvironmentStreaming(from fileURL: URL, toDatabaseURL targetURL: String, mode: RestoreMode = .clean, parallel: Bool = true) async throws -> AsyncThrowingStream<Data, Error> {
+        let (provider, url) = try parseRestoreTarget(targetURL)
+        try requireExisting(fileURL: fileURL)
+        let format = BackupFormat.format(for: fileURL, provider: provider)
+        let command = try restoreCommand(provider: provider, url: url, inputFile: fileURL, format: format, verbose: true, mode: mode, parallel: parallel)
+        return try await ShellRunner.runStreaming(command: command, onToolMissing: raiseToolMissing)
+    }
+
+    /// Shared parsing for the streaming variants: validate scheme + provider.
+    private static func parseRestoreTarget(_ databaseURL: String) throws -> (provider: Provider, url: URL) {
+        guard let url = URL(string: databaseURL), let scheme = url.scheme,
+              let provider = Provider(urlScheme: scheme) else {
+            throw BackupError.unsupportedProvider(URL(string: databaseURL)?.scheme ?? "(none)")
+        }
+        return (provider, url)
+    }
+
+    private static func requireExisting(fileURL: URL) throws {
+        guard FileManager.default.fileExists(atPath: fileURL.path) else {
+            throw BackupError.restoreFailed("Backup file not found.")
+        }
+    }
+
     // MARK: Listing
 
     /// Lists existing backups for a (project, environment), read from that
@@ -281,16 +322,60 @@ enum BackupService {
         }
     }
 
-    private static func restoreCommand(provider: Provider, url: URL, inputFile: URL, format: BackupFormat) throws -> ShellCommand {
+    private static func restoreCommand(provider: Provider, url: URL, inputFile: URL, format: BackupFormat, verbose: Bool = false, mode: RestoreMode = .clean, parallel: Bool = true) throws -> ShellCommand {
+        // `mode` + `parallel` come from the restore confirmation sheet (which
+        // pre-fills from Settings → Restore defaults). Postgres is the only
+        // provider these flags meaningfully affect; mysql/sqlite ignore them.
         switch provider {
         case .postgres:
             switch format {
             case .compressed:
-                return ShellCommand(commandLine: #"pg_restore --clean --if-exists -d "\#(url.absoluteString)" "\#(inputFile.path)""#)
+                // -v makes pg_restore print each relation as it's processed, so
+                // the streaming restore panel shows real progress instead of a
+                // blank log until exit.
+                let v = verbose ? " -v" : ""
+                // `--no-owner`/`--no-privileges`: skip recreating ownership
+                // (`ALTER ... OWNER TO`, `SET ROLE`) and ACLs. Dumps taken as a
+                // superuser (e.g. `postgres`) otherwise fail with hundreds of
+                // "must be able to SET ROLE" errors when restored by a
+                // non-superuser on the target — exactly the failure mode seen
+                // on hosted/managed Postgres. Schema + data load unaffected.
+                let noOwnership = " --no-owner --no-privileges"
+                // -j (parallel jobs) runs N concurrent connections, restoring
+                // tables/indexes/data in parallel. This is the single biggest
+                // pg_restore speedup (often 2–4x) — only valid on custom-format
+                // .dump files, which is exactly this branch. Capped to avoid
+                // overwhelming the DB with connections; defaults to min(CPU
+                // cores, 8). Plain .sql can't be parallelized and stays single.
+                let jobsArg = parallel ? " -j \(max(2, min(ProcessInfo.processInfo.activeProcessorCount, 8)))" : ""
+
+                switch mode {
+                case .clean:
+                    // Drop + recreate every object before loading. Safest,
+                    // idempotent; slowest. `--if-exists` avoids errors on the
+                    // first restore into an empty database.
+                    return ShellCommand(commandLine: #"pg_restore\#(v)\#(jobsArg)\#(noOwnership) --clean --if-exists -d "\#(url.absoluteString)" "\#(inputFile.path)""#)
+                case .truncate:
+                    // TRUNCATE every table in the public schema (CASCADE so FKs
+                    // don't block), then load data only — no schema recreation.
+                    // Fastest "clean result" option, but requires the target's
+                    // table structure to already match the backup. `--data-only`
+                    // + `--disable-triggers` makes the load itself faster too.
+                    // `--disable-triggers` requires superuser on the target.
+                    let truncate = #"psql -d "\#(url.absoluteString)" -v ON_ERROR_STOP=1 -c "TRUNCATE public.* RESTART IDENTITY CASCADE""#
+                    let load = #"pg_restore\#(v)\#(jobsArg)\#(noOwnership) --data-only --disable-triggers -d "\#(url.absoluteString)" "\#(inputFile.path)""#
+                    return ShellCommand(commandLine: "\(truncate) && \(load)")
+                case .append:
+                    // Load schema + data straight on top of whatever's there.
+                    // Fastest, but risks primary-key conflicts if the target
+                    // already has overlapping rows.
+                    return ShellCommand(commandLine: #"pg_restore\#(v)\#(jobsArg)\#(noOwnership) -d "\#(url.absoluteString)" "\#(inputFile.path)""#)
+                }
             case .plainSQL:
-                // psql continues past errors (ON_ERROR_STOP=0) so version-skew
-                // between dump source and target (e.g. a SET for a parameter
-                // the target doesn't know) doesn't abort the whole import.
+                // Plain SQL can't use pg_restore flags (--clean/--jobs/etc. are
+                // custom-format only), so the restore mode doesn't apply — we
+                // always pipe through psql. ON_ERROR_STOP=0 so version-skew
+                // between dump source and target doesn't abort the whole import.
                 return ShellCommand(commandLine: #"psql -v ON_ERROR_STOP=0 -d "\#(url.absoluteString)" -f "\#(inputFile.path)""#)
             }
         case .mysql:

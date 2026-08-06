@@ -158,6 +158,111 @@ enum ShellRunner {
         return output
     }
 
+    /// Streaming variant of `run`: executes `command` and emits its combined
+    /// stdout+stderr as `Data` chunks **as they arrive**, so callers can show
+    /// live progress (e.g. a restore log) instead of waiting for the whole
+    /// output at once. The stream:
+    ///   - yields `Data` chunks while the process runs,
+    ///   - finishes (returns) when the process exits,
+    ///   - throws `ShellRunnerError` on a non-zero exit (with the full output
+    ///     accumulated so far) or a timeout.
+    ///
+    /// Used by long-running, output-rich commands like `pg_restore -v` /
+    /// `psql -f`, where the buffered `run` would leave the UI blind until exit.
+    static func runStreaming(
+        command: ShellCommand,
+        directory: String? = nil,
+        timeout: TimeInterval? = nil,
+        onToolMissing: (String) throws -> Void = { _ in }
+    ) async throws -> AsyncThrowingStream<Data, Error> {
+        let env = resolvedEnvironment(overlaying: command.extraEnvironment)
+
+        if let tool = command.tool {
+            try ensureToolAvailable(tool, in: env, onMissing: onToolMissing)
+        }
+
+        let (shell, args) = loginShell(for: command.commandLine)
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: shell)
+        process.arguments = args
+        process.environment = env
+        if let directory {
+            process.currentDirectoryURL = URL(fileURLWithPath: directory)
+        }
+
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+
+        do { try process.run() } catch {
+            throw ShellRunnerError.launchFailed(error.localizedDescription)
+        }
+
+        var timedOut = false
+        if let timeout {
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
+                if process.isRunning {
+                    timedOut = true
+                    process.terminate()
+                }
+            }
+        }
+
+        return AsyncThrowingStream { continuation in
+            // `Process`/`Pipe`'s FileHandle are not Sendable (Foundation
+            // types). Under Swift 6 strict concurrency we hand them to a
+            // `nonisolated` helper that owns them for the lifetime of the pump:
+            // from spawn until waitUntilExit returns, after which the stream
+            // finishes and nothing else touches them. The helper spawns its own
+            // detached task internally so this build closure captures nothing
+            // non-Sendable.
+            Self.startPump(
+                pipe: pipe,
+                process: process,
+                timedOut: timedOut,
+                timeout: timeout,
+                into: continuation
+            )
+        }
+    }
+
+    /// Spawns the background pump task. `nonisolated` + `nonisolated(unsafe)`
+    /// params let the non-Sendable `Process`/`Pipe` cross the isolation
+    /// boundary: this is safe because nothing else touches them between spawn
+    /// and the pump's `waitUntilExit` (the stream is the sole consumer).
+    nonisolated private static func startPump(
+        pipe nonisolatedPipe: Pipe,
+        process nonisolatedProcess: Process,
+        timedOut: Bool,
+        timeout: TimeInterval?,
+        into continuation: AsyncThrowingStream<Data, Error>.Continuation
+    ) {
+        let readHandle = nonisolatedPipe.fileHandleForReading
+        Task.detached(priority: .userInitiated) {
+            var accumulated = Data()
+            while true {
+                let chunk = readHandle.availableData
+                if chunk.isEmpty {
+                    // EOF — pipe closed, process is finishing.
+                    break
+                }
+                accumulated.append(chunk)
+                continuation.yield(chunk)
+            }
+            nonisolatedProcess.waitUntilExit()
+            if timedOut {
+                continuation.finish(throwing: ShellRunnerError.timedOut(seconds: timeout ?? 0))
+                return
+            }
+            if nonisolatedProcess.terminationStatus != 0 {
+                let out = String(data: accumulated, encoding: .utf8) ?? ""
+                continuation.finish(throwing: ShellRunnerError.launchFailed("Exit \(nonisolatedProcess.terminationStatus): \(out)"))
+                return
+            }
+            continuation.finish()
+        }
+    }
+
     // MARK: Environment + shell resolution
 
     /// The augmented environment: inherited env, overlaid with any extras, with

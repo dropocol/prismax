@@ -17,6 +17,8 @@ private struct GeneralSettingsView: View {
     @AppStorage("includeSchemaArg") private var includeSchemaArg = false
     @AppStorage("terminalPlacement") private var placementRaw: String = TerminalPlacement.bottom.rawValue
     @AppStorage("terminalMode") private var terminalModeRaw: String = TerminalMode.persistent.rawValue
+    @AppStorage("restoreMode") private var restoreModeRaw: String = RestoreMode.clean.rawValue
+    @AppStorage("restoreParallel") private var restoreParallel = true
 
     /// App-wide default backup folder (mirrors `BackupSettings.globalLocationKey`).
     /// Held as State and refreshed on appear/change since the path is set via
@@ -34,6 +36,13 @@ private struct GeneralSettingsView: View {
         Binding(
             get: { TerminalMode(rawValue: terminalModeRaw) ?? .persistent },
             set: { terminalModeRaw = $0.rawValue }
+        )
+    }
+
+    private var restoreMode: Binding<RestoreMode> {
+        Binding(
+            get: { RestoreMode(rawValue: restoreModeRaw) ?? .clean },
+            set: { restoreModeRaw = $0.rawValue }
         )
     }
 
@@ -61,6 +70,20 @@ private struct GeneralSettingsView: View {
             }
             Section("Backups") {
                 backupsSection
+            }
+            Section("Restore") {
+                Picker("Mode", selection: restoreMode) {
+                    ForEach(RestoreMode.allCases) { mode in
+                        Text(mode.label).tag(mode)
+                    }
+                }
+                .pickerStyle(.radioGroup)
+                .help(restoreMode.wrappedValue.help)
+                Text(restoreMode.wrappedValue.help)
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                Toggle("Parallel jobs (compressed backups only)", isOn: $restoreParallel)
+                    .help("Restore compressed (.dump) backups using multiple parallel connections — 2–4x faster. Only applies to Postgres .dump files.")
             }
         }
         .formStyle(.grouped)
@@ -139,7 +162,7 @@ private struct AboutSettingsView: View {
             Text("PrismaX")
                 .font(.system(size: 19, weight: .semibold))
                 .foregroundStyle(.primary)
-            Text("Version 1.0")
+            Text("Version 0.1.0")
                 .font(.micro)
                 .tracking(0.3)
                 .foregroundStyle(.tertiary)

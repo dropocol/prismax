@@ -17,3 +17,6 @@ xcuserdata/
 *.dmg
 
 samples
+
+# ZCode agent workspace (plans, scratch, session data)
+.zcode/

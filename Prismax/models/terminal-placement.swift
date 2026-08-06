@@ -51,3 +51,43 @@ enum TerminalMode: String, CaseIterable, Identifiable {
         }
     }
 }
+
+/// How a restore prepares the destination before loading data. Persisted in
+/// @AppStorage("restoreMode"). Controls the flags passed to `pg_restore` /
+/// the pre-restore SQL, trading speed against safety.
+enum RestoreMode: String, CaseIterable, Identifiable {
+    /// Drop and recreate every object (`pg_restore --clean --if-exists`).
+    /// Safest and fully idempotent — no primary-key conflicts possible — but
+    /// slowest because each object is dropped then re-created sequentially.
+    case clean
+    /// TRUNCATE all tables first, then load fresh data. Faster than `clean`
+    /// (no per-object drop/recreate) and produces a clean result, but needs
+    /// the destination's table structure to already match the backup.
+    case truncate
+    /// Load data straight on top of whatever's in the destination — no drops,
+    /// no truncates. Fastest, but risks primary-key conflicts if the target
+    /// already contains overlapping rows. Best into empty/fresh databases.
+    case append
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .clean: "Drop & recreate (safe)"
+        case .truncate: "Truncate then load"
+        case .append: "Append into target (fastest)"
+        }
+    }
+
+    /// One-line help shown under each option in Settings.
+    var help: String {
+        switch self {
+        case .clean:
+            "Drops and recreates every object before loading. Safest, no conflicts, but slowest."
+        case .truncate:
+            "Empties all tables first, then loads fresh data. Faster; needs the target schema to match."
+        case .append:
+            "Loads data on top of existing rows. Fastest; can hit conflicts if the target isn't empty."
+        }
+    }
+}

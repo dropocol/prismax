@@ -20,8 +20,13 @@ struct EnvironmentsTab: View {
             VStack(alignment: .leading, spacing: 20) {
                 envFileSection
                 variablesSection
-                Divider()
-                GuardrailsSection(project: project, environment: environment)
+                // Guardrails gate Prisma command execution against this
+                // environment — meaningless for backups-only projects (which
+                // have no commands), so hide the section there.
+                if !project.isBackupsOnly {
+                    Divider()
+                    GuardrailsSection(project: project, environment: environment)
+                }
             }
             .padding(16)
         }

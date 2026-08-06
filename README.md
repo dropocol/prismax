@@ -99,7 +99,7 @@ generates the Xcode project, builds a Release `.app`, and packages a `.dmg`
 into `./dist`:
 
 ```bash
-./build.sh                 # → dist/PrismaX.app + dist/PrismaX-1.0.dmg
+./build.sh                 # → dist/PrismaX.app + dist/PrismaX-0.1.0.dmg
 ./build.sh --no-dmg        # just the .app
 ./build.sh --clean         # rebuild from scratch
 ```

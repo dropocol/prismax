@@ -11,13 +11,26 @@ struct BackupsTab: View {
     @State private var isRestoring = false
     @State private var statusMessage: String?
     @State private var statusError = false
-    @State private var restoreTarget: BackupResult?
     @State private var scheduleEnabled = false
     @State private var scheduleFrequency: BackupFrequency = .daily
     @State private var backupFormat: BackupFormat = .compressed
     @State private var schemaOnly = false
-    @State private var crossEnvTarget: BackupResult?
-    @State private var crossEnvDestination: EnvProfile?
+
+    /// The restore the user is confirming in the sheet (destination + backup).
+    /// Set by either restore-menu choice; the sheet pre-fills mode/parallel
+    /// from Settings and lets the user override per-restore.
+    @State private var pendingRestore: PendingRestore?
+    @AppStorage("restoreMode") private var restoreModeDefaultRaw: String = RestoreMode.clean.rawValue
+    @AppStorage("restoreParallel") private var restoreParallelDefault = true
+
+    /// Live progress for an in-flight restore. While non-nil, a right-side
+    /// inspector panel docks into the tab showing the streaming restore log.
+    @State private var restoreProgress: RestoreProgress?
+    @AppStorage("restorePanelWidth") private var panelWidthRaw: Double = 380
+    private var panelWidth: CGFloat { CGFloat(panelWidthRaw) }
+    private var panelWidthBinding: Binding<CGFloat> {
+        Binding(get: { CGFloat(panelWidthRaw) }, set: { panelWidthRaw = Double($0) })
+    }
 
     /// Resolved DATABASE_URL for the current environment, sourced from the
     /// connected `.env` file AND Keychain variables (via `EnvironmentResolver`),
@@ -38,47 +51,53 @@ struct BackupsTab: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                backupCard
-                storageCard
-                scheduleCard
-                historyCard
+        HStack(spacing: 0) {
+            // The tab's normal scrollable content.
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    backupCard
+                    storageCard
+                    scheduleCard
+                    historyCard
+                }
+                .padding(16)
             }
-            .padding(16)
+
+            // Right-side restore progress inspector. Visible only while a
+            // restore is in flight (or just finished, awaiting dismissal).
+            if let progress = restoreProgress {
+                ResizeDivider(orientation: .vertical,
+                              value: panelWidthBinding,
+                              range: 280...720)
+                RestoreProgressPanel(progress: progress) {
+                    withAnimation(.snappy(duration: 0.2)) { restoreProgress = nil }
+                }
+                .frame(width: panelWidth)
+            }
         }
         .onAppear { refresh() }
         .onChange(of: environment.id) { refresh() }
-        .alert("Restore Backup?", isPresented: Binding(
-            get: { restoreTarget != nil },
-            set: { if !$0 { restoreTarget = nil } }
+        // Single restore-confirmation sheet for both same-env and cross-env
+        // restores. Pre-fills mode/parallel from Settings; the user can change
+        // them per-restore. Confirms with the chosen (mode, parallel).
+        .sheet(isPresented: Binding(
+            get: { pendingRestore != nil },
+            set: { if !$0 { pendingRestore = nil } }
         )) {
-            Button("Cancel", role: .cancel) { restoreTarget = nil }
-            Button("Restore", role: .destructive) {
-                if let target = restoreTarget { performRestore(target) }
-                restoreTarget = nil
-            }
-        } message: {
-            if let target = restoreTarget {
-                Text("Restoring \(target.fileURL.lastPathComponent) will overwrite the current **\(environment.name)** database. This cannot be undone.")
-            }
-        }
-        .alert("Restore to Another Environment?", isPresented: Binding(
-            get: { crossEnvTarget != nil },
-            set: { if !$0 { crossEnvTarget = nil; crossEnvDestination = nil } }
-        )) {
-            Button("Cancel", role: .cancel) {
-                crossEnvTarget = nil
-                crossEnvDestination = nil
-            }
-            Button("Restore", role: .destructive) {
-                if let target = crossEnvTarget { performCrossEnvRestore(target) }
-                crossEnvTarget = nil
-                crossEnvDestination = nil
-            }
-        } message: {
-            if let target = crossEnvTarget, let dest = crossEnvDestination {
-                Text("Restoring \(target.fileURL.lastPathComponent) into **\(dest.name)** will overwrite that database. This cannot be undone.")
+            if let pending = pendingRestore {
+                RestoreConfirmationSheet(
+                    backupFileName: pending.backup.fileURL.lastPathComponent,
+                    destinationName: pending.destinationName,
+                    isCrossEnvironment: pending.isCrossEnvironment,
+                    mode: RestoreMode(rawValue: restoreModeDefaultRaw) ?? .clean,
+                    parallel: restoreParallelDefault,
+                    onConfirm: { mode, parallel in
+                        let confirmed = pending
+                        pendingRestore = nil
+                        runRestore(confirmed, mode: mode, parallel: parallel)
+                    },
+                    onCancel: { pendingRestore = nil }
+                )
             }
         }
     }
@@ -194,6 +213,26 @@ struct BackupsTab: View {
 
             if let statusMessage {
                 statusPill(message: statusMessage, error: statusError)
+                // When the run failed, offer a copy button so the (often long,
+                // truncated) tool error can be copied for diagnostics.
+                if statusError {
+                    Button {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(statusMessage, forType: .string)
+                    } label: {
+                        Image(systemName: "doc.on.doc")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 22, height: 22)
+                            .background(
+                                RoundedRectangle(cornerRadius: 5)
+                                    .fill(Color.primary.opacity(0.06))
+                            )
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Copy error")
+                }
             }
             Spacer(minLength: 0)
         }
@@ -377,13 +416,24 @@ struct BackupsTab: View {
                         BackupRow(
                             backup: backup,
                             currentEnvironmentName: environment.name,
-                            onRestore: { restoreTarget = backup },
+                            onRestore: {
+                                pendingRestore = PendingRestore(
+                                    backup: backup,
+                                    destination: environment,
+                                    destinationName: environment.name,
+                                    isCrossEnvironment: false
+                                )
+                            },
                             onReveal: { BackupService.reveal(fileURL: backup.fileURL) },
                             onDelete: { delete(backup) },
                             crossDestinations: crossDestinations,
                             onCrossEnvRestore: { dest in
-                                crossEnvTarget = backup
-                                crossEnvDestination = dest
+                                pendingRestore = PendingRestore(
+                                    backup: backup,
+                                    destination: dest,
+                                    destinationName: dest.name,
+                                    isCrossEnvironment: true
+                                )
                             }
                         )
                     }
@@ -486,45 +536,46 @@ struct BackupsTab: View {
         }
     }
 
-    private func performRestore(_ backup: BackupResult) {
-        guard let url = resolvedDatabaseURL else { return }
-        isRestoring = true
-        statusMessage = nil
-        Task {
-            do {
-                _ = try await BackupService.restore(databaseURL: url, from: backup.fileURL)
-                await MainActor.run {
-                    isRestoring = false
-                    statusMessage = "Restore complete."
-                    statusError = false
-                }
-            } catch {
-                await MainActor.run {
-                    isRestoring = false
-                    statusMessage = error.localizedDescription
-                    statusError = true
-                }
-            }
+    /// Runs a confirmed restore. Unified path for same-env and cross-env: the
+    /// destination (and whether it's cross-env) is captured in `pending`. The
+    /// `mode`/`parallel` come from the confirmation sheet (pre-filled from
+    /// Settings, overridable per-restore). Streams output to the progress panel.
+    private func runRestore(_ pending: PendingRestore, mode: RestoreMode, parallel: Bool) {
+        let backup = pending.backup
+        let dest = pending.destination
+        guard let targetURL = resolvedURL(for: dest) else {
+            statusMessage = "\(dest.name) has no resolvable DATABASE_URL."
+            statusError = true
+            return
         }
-    }
-
-    /// Restores `backup` into a different environment's database
-    /// (`crossEnvDestination`), leaving the source file in place.
-    private func performCrossEnvRestore(_ backup: BackupResult) {
-        guard let dest = crossEnvDestination,
-              let targetURL = resolvedURL(for: dest) else { return }
+        let progress = RestoreProgress(
+            backupFileName: backup.fileURL.lastPathComponent,
+            destinationName: dest.name
+        )
+        withAnimation(.snappy(duration: 0.2)) { restoreProgress = progress }
         isRestoring = true
-        statusMessage = nil
+        statusMessage = pending.isCrossEnvironment ? "Restoring into \(dest.name)…" : "Restoring…"
+        statusError = false
         Task {
             do {
-                _ = try await BackupService.restoreCrossEnvironment(from: backup.fileURL, toDatabaseURL: targetURL)
+                let stream = try await BackupService.restoreCrossEnvironmentStreaming(
+                    from: backup.fileURL,
+                    toDatabaseURL: targetURL,
+                    mode: mode,
+                    parallel: parallel
+                )
+                for try await chunk in stream {
+                    await MainActor.run { progress.append(chunk) }
+                }
                 await MainActor.run {
+                    progress.succeed()
                     isRestoring = false
-                    statusMessage = "Restored into \(dest.name)."
+                    statusMessage = pending.isCrossEnvironment ? "Restored into \(dest.name)." : "Restore complete."
                     statusError = false
                 }
             } catch {
                 await MainActor.run {
+                    progress.fail(error.localizedDescription)
                     isRestoring = false
                     statusMessage = error.localizedDescription
                     statusError = true
@@ -537,5 +588,15 @@ struct BackupsTab: View {
         try? BackupService.delete(fileURL: backup.fileURL)
         refresh()
     }
+}
+
+/// A restore the user is about to confirm in the sheet. Captured at the moment
+/// they pick a destination from the Restore menu, then handed to `runRestore`
+/// once they confirm (with their chosen mode + parallel setting).
+private struct PendingRestore {
+    let backup: BackupResult
+    let destination: EnvProfile
+    let destinationName: String
+    let isCrossEnvironment: Bool
 }
 
